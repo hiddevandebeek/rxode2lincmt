@@ -1,7 +1,8 @@
 # sensType 32 (all directions in one forward-mode pass) against 3 (fvar).
 # The value is one shared primal and must hold to the bit; the Jacobians are
 # different template instantiations, which a compiler may FMA-contract
-# differently, so they are held to round-off.
+# differently, so they are held to round-off (5e-12 on GitHub's ubuntu
+# runners).
 .relMax <- function(x, y) {
   x <- as.numeric(x)
   y <- as.numeric(y)
@@ -26,7 +27,7 @@ test_that("linCmtModelDouble serves sensType 32 and agrees with 3 to round-off",
     .a <- .call1(3L)
     .b <- .call1(32L)
     expect_identical(as.numeric(.a$val), as.numeric(.b$val))
-    expect_lt(.relMax(.a$J, .b$J), 1e-12)
-    expect_lt(.relMax(.a$Jg, .b$Jg), 1e-12)
+    expect_lt(.relMax(.a$J, .b$J), 1e-10)
+    expect_lt(.relMax(.a$Jg, .b$Jg), 1e-10)
   }
 })

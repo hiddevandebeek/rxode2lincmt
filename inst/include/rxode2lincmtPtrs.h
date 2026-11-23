@@ -103,7 +103,9 @@ static inline void iniRxode2lincmtCarryReset(SEXP p, rxLcIndFree_t *out) {
    carry through slot 9 calls it with 1 once it has read the list.  The
    linCmt() carry then lives in rxode2lincmt's per-subject storage, as many
    columns as the model writes, instead of ind->linCmtCarryT.  Returns NULL
-   when the list is shorter. */
+   when the list is shorter.  RXLC_HAS_CARRY_OWN marks a header with this
+   reader. */
+#define RXLC_HAS_CARRY_OWN 1
 typedef int (*rxLcCarryOwn_t)(int own);
 static inline rxLcCarryOwn_t iniRxode2lincmtCarryOwn(SEXP p) {
   if (Rf_length(p) > 10) {

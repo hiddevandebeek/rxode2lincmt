@@ -7,7 +7,9 @@
   as.integer(whI * 10000L + (cmt0 + 1L) * 100L + 1L)
 }
 
-# The probe's carry after each row, as an n x m x npair array
+# The probe's carry after each row, as an n x m x npair array; inSolve keeps
+# the carry in a solve buffer (an rxode2 sending op->numLinCarry) instead of
+# the fixed array
 .carryProbe <- function(
   evid,
   dose,
@@ -18,7 +20,8 @@
   oral0,
   mask = 0L,
   linOffset = 0L,
-  fast = FALSE
+  fast = FALSE,
+  inSolve = FALSE
 ) {
   # by its registered name: lintr sees a backticked symbol as a global
   .r <- .Call(
@@ -33,6 +36,7 @@
     as.integer(mask),
     as.integer(linOffset),
     fast,
+    inSolve,
     PACKAGE = "rxode2lincmt"
   )
   array(.r, dim(add))
@@ -124,7 +128,8 @@
   oral0,
   mask = 0L,
   linOffset = 0L,
-  fast = FALSE
+  fast = FALSE,
+  inSolve = FALSE
 ) {
   .p <- .carryProbe(
     cs$evid,
@@ -136,7 +141,8 @@
     oral0,
     mask,
     linOffset,
-    fast
+    fast,
+    inSolve
   )
   .r <- .carryRef(
     cs$evid,
@@ -155,7 +161,7 @@
 
 # The probe's carry for 6 rows of a 1-cmt IV subject with M = 0.5 and an add
 # of 1 on every row, theta constant
-.carryRun1 <- function(evid, dose, fast = FALSE, mask = 0L) {
+.carryRun1 <- function(evid, dose, fast = FALSE, mask = 0L, inSolve = FALSE) {
   .th <- matrix(rep(c(1, 10, 0, 0, 0, 0, 0), each = 6L), 6L, 7)
   as.vector(.carryProbe(
     evid,
@@ -167,6 +173,7 @@
     0L,
     mask,
     0L,
-    fast
+    fast,
+    inSolve
   ))
 }

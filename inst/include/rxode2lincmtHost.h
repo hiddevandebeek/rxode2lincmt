@@ -93,7 +93,12 @@
   X(ind, linCmtOriginSS, int, )                                              \
   X(ind, linCmtOriginHist, double*, )                                        \
   X(ind, linCmtOriginHistCap, int, )                                         \
-  X(ind, linCmtOriginHistW, int, )
+  X(ind, linCmtOriginHistW, int, )                                           \
+  /* A host that sends the next three keeps the carry in ind->solve: the */  \
+  /* last op->numLinCarry states of each row, state k = row + m*pair */       \
+  X(ind, n_all_times, int, )                                                 \
+  X(op, numLinCarry, int, )                                                  \
+  X(ind, linCmtCarryRow, int, )
 
 /* X(name, returnType, (argTypes)) */
 #define RXLC_HOST_FNS(X)                                                     \

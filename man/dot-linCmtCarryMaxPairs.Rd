@@ -2,18 +2,20 @@
 % Please edit documentation in R/RcppExports.R
 \name{.linCmtCarryMaxPairs}
 \alias{.linCmtCarryMaxPairs}
-\title{Carry pairs the registered rxode2 has room for}
+\title{Carry pairs a model may have}
 \usage{
 .linCmtCarryMaxPairs()
 }
 \value{
-integer: the cap of the registered rxode2, at most 32 (the
-most this package supports), and 8 before one registers
+integer: 1048576 when this package owns the carry, otherwise
+the cap of the registered rxode2, and 8 before one registers
 }
 \description{
 The \code{linCmt()} carry keeps one column per carry-eligible (linCmt
-parameter, eta) pair in rxode2's subject struct; rxode2's
-\code{RX_LINCMT_CARRY_MAXPAIRS} sets how many, and this package indexes them
-with that cap.  nlmixr2est keeps a model's carry within it.
+parameter, eta) pair.  Once rxode2 hands the carry to this package
+(pointer slot 10) the columns are allocated per subject as the model
+writes them; before, they are rxode2's \code{ind->linCmtCarryT}, whose
+\code{RX_LINCMT_CARRY_MAXPAIRS} sets how many.  nlmixr2est keeps a model's
+carry within this.
 }
 \keyword{internal}

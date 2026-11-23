@@ -22,10 +22,12 @@
  */
 #include <stddef.h>
 
-/* RXLC_CARRY_MAXPAIRS is the most carry pairs this rxode2lincmt supports.
-   The host's own cap, its RX_LINCMT_CARRY_MAXPAIRS (sent as [0][1] of the
-   wire), sizes ind->linCmtCarryT and is the stride and the bound at run
-   time; past RXLC_CARRY_MAXPAIRS, the pairs beyond it give NA.
+/* RXLC_CARRY_MAXPAIRS is the most columns a host may give
+   ind->linCmtCarryT.  The host's own cap, its RX_LINCMT_CARRY_MAXPAIRS (sent
+   as [0][1] of the wire), sizes that array and is its stride and bound at
+   run time.  A host that hands the carry to rxode2lincmt (pointer slot 10,
+   linCmtCarryOwn()) no longer uses the array: the carry then has as many
+   columns as the model writes.
    RXLC_ORIGIN_MAX is fixed here, never taken from the includer.
    RXLC_HOST_STATIC_CHECKS fails rxode2's compile if its own RX_LINCMT_*
    values are out of range. */

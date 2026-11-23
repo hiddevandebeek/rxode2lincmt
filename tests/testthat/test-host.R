@@ -94,7 +94,7 @@ test_that("a registered host's carry cap is the one in use", {
   }
 })
 
-test_that("a host's carry cap is never refused at load; the pair bound stops at 32", {
+test_that("a host's carry cap is never refused at load and is the pair bound", {
   .o <- .rxode2lincmtHostInfo()$offsets
   on.exit(.rxode2lincmtIniHost(list(.o)))
   for (.cap in c(33L, 64L, 0L)) {
@@ -102,7 +102,7 @@ test_that("a host's carry cap is never refused at load; the pair bound stops at 
     .w[2] <- .cap
     expect_no_error(.rxode2lincmtIniHost(list(.w)))
     expect_identical(.rxode2lincmtHostInfo()$offsets, .w)
-    expect_identical(.linCmtCarryMaxPairs(), min(.cap, 32L))
+    expect_identical(.linCmtCarryMaxPairs(), .cap)
   }
 })
 
@@ -120,12 +120,10 @@ test_that("a carry restart at a reset clears only the columns written, at the ho
   .r <- .Call(`_rxode2lincmt_carryRestartProbe`, 32L, 32L)
   expect_true(all(.r[1:128] == 0))
   expect_true(all(.r[129:136] == 7))
-  # a 33-column host: the stride is 33, but only the 32 pairs within the
-  # bound are cleared
+  # a 33-column host with a stale mark past it: the stride is 33, and only
+  # its 33 columns are cleared
   .r <- .Call(`_rxode2lincmt_carryRestartProbe`, 33L, 40L)
-  .m <- matrix(.r[1:132], nrow = 4, byrow = TRUE)
-  expect_true(all(.m[, 1:32] == 0))
-  expect_true(all(.m[, 33] == 7))
+  expect_true(all(.r[1:132] == 0))
   expect_true(all(.r[133:136] == 7))
   # a host with no carry columns clears nothing
   .r <- .Call(`_rxode2lincmt_carryRestartProbe`, 0L, 3L)

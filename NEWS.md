@@ -2,6 +2,14 @@
 
 ## New features
 
+- The `linCmt()` carry can live in this package's per-subject storage, as
+  many columns as the model writes (32 at first, doubled as needed), so a
+  model is no longer held to rxode2's fixed `RX_LINCMT_CARRY_MAXPAIRS`.  An
+  'rxode2' that resets every subject's carry through slot 9 hands it over by
+  calling `linCmtCarryOwn(1)`, slot 10 of the pointer table (read with
+  `iniRxode2lincmtCarryOwn()`); `.linCmtCarryMaxPairs()` is then 1048576.
+  An 'rxode2' that does not keeps the carry in `ind->linCmtCarryT`.
+
 - `linCmtCarryReset()`, slot 9 of the pointer table (read with
   `iniRxode2lincmtCarryReset()`), zeroes only the carry columns a subject
   has written since its last reset, so 'rxode2' need not clear the whole
@@ -11,9 +19,8 @@
 
 - The `linCmt()` sensitivity carry reads its column count from the
   registered 'rxode2' at run time (`.linCmtCarryMaxPairs()`) instead of
-  compiling in 8, and uses it as the column stride.  Pairs are bounded by
-  that count, at most 32; a pair past the bound gives `NA`.  Nothing is
-  checked at load.  The carry advance also multiplies only the columns a
+  compiling in 8, and uses it as the column stride and the pair bound; a
+  pair past it gives `NA`.  Nothing is checked at load.  The carry advance also multiplies only the columns a
   model uses, and the restart at a reset clears only those.
 
 # rxode2lincmt 0.1.1

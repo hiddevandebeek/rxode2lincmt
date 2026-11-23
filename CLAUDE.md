@@ -52,7 +52,8 @@ rebuilding.
 1. **lincmt table (this package -> rxode2).**  `src/ptr.c`
    `_rxode2lincmt_ptr()` returns external pointers to `linCmtA`, `linCmtB`,
    `ensureLinCmtA`, `ensureLinCmtB`, `linCmtBindFree`, `linCmtScaleInitPar`,
-   `linCmtScaleInitN`, `linCmtZeroJac`, `linCmtFreeInd` (R:
+   `linCmtScaleInitN`, `linCmtZeroJac`, `linCmtFreeInd`, `linCmtCarryReset`,
+   `linCmtCarryOwn` (R:
    `.rxode2lincmtPtr()`).  rxode2 reads it with the reader in
    `inst/include/rxode2lincmtPtrs.h`.
 2. **host table (rxode2 -> this package).**  rxode2 calls
@@ -94,8 +95,8 @@ This package never includes rxode2's struct headers.  `rx_solve`,
 
 ### Memory and threads across the two DLLs
 
-- Anything linCmt allocates (`linCmtRateHist`, `linCmtOriginHist` via
-  `realloc`, `linCmtBind` via `new`) is freed only here, through
+- Anything linCmt allocates (`linCmtRateHist`, `linCmtOriginHist` and the
+  bind's owned carry via `realloc`, `linCmtBind` via `new`) is freed only here, through
   `linCmtFreeInd` / `linCmtBindFree`.  Never free or reallocate a linCmt
   buffer in rxode2 or a linCmt buffer's owner here from rxode2's memory -- on
   Windows the two DLLs can use different heaps.

@@ -25,8 +25,9 @@ double linCmtScaleInitN(void);
 int linCmtZeroJac(int i);
 void linCmtFreeInd(rx_solving_options_ind *ind);
 void linCmtCarryReset(rx_solving_options_ind *ind);
+int linCmtCarryOwn(int own);
 
-#define LC_NPTR 10
+#define LC_NPTR 11
 
 SEXP _rxode2lincmt_ptr(void) {
   SEXP ret = PROTECT(Rf_allocVector(VECSXP, LC_NPTR));
@@ -46,6 +47,7 @@ SEXP _rxode2lincmt_ptr(void) {
   LC_PTR_(linCmtZeroJac)
   LC_PTR_(linCmtFreeInd)
   LC_PTR_(linCmtCarryReset)
+  LC_PTR_(linCmtCarryOwn)
   Rf_setAttrib(ret, R_NamesSymbol, nm);
   UNPROTECT(2);
   return ret;

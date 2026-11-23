@@ -99,6 +99,19 @@ static inline void iniRxode2lincmtCarryReset(SEXP p, rxLcIndFree_t *out) {
   }
 }
 
+/* Slot 10, linCmtCarryOwn(own): a consumer that resets every subject's
+   carry through slot 9 calls it with 1 once it has read the list.  The
+   linCmt() carry then lives in rxode2lincmt's per-subject storage, as many
+   columns as the model writes, instead of ind->linCmtCarryT.  Returns NULL
+   when the list is shorter. */
+typedef int (*rxLcCarryOwn_t)(int own);
+static inline rxLcCarryOwn_t iniRxode2lincmtCarryOwn(SEXP p) {
+  if (Rf_length(p) > 10) {
+    return (rxLcCarryOwn_t) R_ExternalPtrAddrFn(VECTOR_ELT(p, 10));
+  }
+  return NULL;
+}
+
 #if defined(__cplusplus)
 }
 #endif

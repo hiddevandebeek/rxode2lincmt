@@ -108,8 +108,8 @@ linCmtModelDouble <- function(dt, p1, v1, p2, p3, p4, p5, ka, alastNV, rateNV, n
 #' parameter, eta) pair in rxode2's subject struct; rxode2's
 #' `RX_LINCMT_CARRY_MAXPAIRS` sets how many, and this package indexes them
 #' with that cap.  nlmixr2est keeps a model's carry within it.
-#' @return integer: the cap of the registered rxode2, and 8 before one
-#'   registers
+#' @return integer: the cap of the registered rxode2, at most 32 (the
+#'   most this package supports), and 8 before one registers
 #' @keywords internal
 #' @export
 .linCmtCarryMaxPairs <- function() {

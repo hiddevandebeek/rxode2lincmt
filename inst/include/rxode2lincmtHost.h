@@ -9,9 +9,9 @@
  * every field through those offsets (see src/lcHost.h).
  *
  * APPEND ONLY.  The row order is the wire order; a released rxode2 built
- * against an older list keeps working with a newer rxode2lincmt.  At load
- * only the carry cap is checked (see RXLC_CARRY_MAXPAIRS) -- rxode2 enforces
- * the types at its own compile time with RXLC_HOST_STATIC_CHECKS.
+ * against an older list keeps working with a newer rxode2lincmt.  Nothing
+ * checks this list at load -- rxode2 enforces the types at its own compile
+ * time with RXLC_HOST_STATIC_CHECKS.
  *
  * Wire format (VECSXP):
  *   [0] INTSXP: sizeof(rx_solving_options_ind), RX_LINCMT_CARRY_MAXPAIRS,
@@ -25,7 +25,7 @@
 /* RXLC_CARRY_MAXPAIRS is the most carry pairs this rxode2lincmt supports.
    The host's own cap, its RX_LINCMT_CARRY_MAXPAIRS (sent as [0][1] of the
    wire), sizes ind->linCmtCarryT and is the stride and the bound at run
-   time; a host cap past RXLC_CARRY_MAXPAIRS stops at load.
+   time; past RXLC_CARRY_MAXPAIRS, the pairs beyond it give NA.
    RXLC_ORIGIN_MAX is fixed here, never taken from the includer.
    RXLC_HOST_STATIC_CHECKS fails rxode2's compile if its own RX_LINCMT_*
    values are out of range. */

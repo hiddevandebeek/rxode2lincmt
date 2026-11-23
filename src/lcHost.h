@@ -43,10 +43,16 @@ extern ptrdiff_t _lcOff[lcOffN];
                                                   (ptrdiff_t)(id)*_lcOff[lcOffIndSize]))
 /* Only for fields appended after the first release */
 #define LC_HAS(s, f) (_lcOff[lcOff_##s##f] >= 0)
-/* The host's carry cap (8 until a host registers): the column stride of
-   ind->linCmtCarryT and the bound on its pair index */
+/* The host's carry cap, the column stride of ind->linCmtCarryT: 8 until a
+   host registers (-1), 0 for a host that reports none.  Never checked at
+   load; LC_CARRY_NPAIR bounds the pair index instead. */
 #define LC_CARRY_CAP_UNSET 8
-#define LC_CARRY_CAP ((int)(_lcOff[lcOffCarryMax] > 0 ? _lcOff[lcOffCarryMax] : LC_CARRY_CAP_UNSET))
+#define LC_CARRY_CAP ((int)(_lcOff[lcOffCarryMax] == -1 ? LC_CARRY_CAP_UNSET : \
+                            (_lcOff[lcOffCarryMax] > 0 ? _lcOff[lcOffCarryMax] : 0)))
+/* The bound on a carry pair index: the host's cap, at most
+   RXLC_CARRY_MAXPAIRS (the size of this package's scratch); a pair past it
+   gives NA */
+#define LC_CARRY_NPAIR ((int)(LC_CARRY_CAP < RXLC_CARRY_MAXPAIRS ? LC_CARRY_CAP : RXLC_CARRY_MAXPAIRS))
 
 /* Host functions; each starts at a local fallback, never NULL */
 #define LC_FT_(n, r, a) typedef r (*lcHostFn_##n) a;

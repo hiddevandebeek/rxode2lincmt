@@ -7,8 +7,8 @@
 .linCmtCarryMaxPairs()
 }
 \value{
-integer: the cap of the registered rxode2, and 8 before one
-registers
+integer: the cap of the registered rxode2, at most 32 (the
+most this package supports), and 8 before one registers
 }
 \description{
 The \code{linCmt()} carry keeps one column per carry-eligible (linCmt

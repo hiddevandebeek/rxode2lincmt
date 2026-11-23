@@ -391,6 +391,13 @@ typedef struct linCmtBind_s {
   int carryNpair = 0;
 } linCmtBind;
 
+// A bind's carry columns in use, within the pair bound (LC_CARRY_NPAIR)
+static inline int linCmtCarryNpairUsed(const linCmtBind *b) {
+  if (b == NULL) return 0;
+  int bound = LC_CARRY_NPAIR;
+  return b->carryNpair < bound ? b->carryNpair : bound;
+}
+
 // Allocated on first touch inside the solve; released with the subject in
 // rxFreeInd().  One individual is only ever solved by one thread at a time,
 // so this needs no locking.
@@ -422,10 +429,14 @@ static inline linCmtBind &linCmtBindGet(rx_solving_options_ind *ind) {
 // linCmtBindFree() resets before releasing it.
 extern "C" void linCmtCarryReset(rx_solving_options_ind *ind) {
   linCmtBind *b = (linCmtBind*)IND(ind, linCmtBind);
-  if (b == NULL || b->carryNpair == 0) return;
+  int npair = linCmtCarryNpairUsed(b);
+  if (npair == 0) {
+    if (b != NULL) b->carryNpair = 0;
+    return;
+  }
   int cap = LC_CARRY_CAP;
   for (int r = 0; r < 4; r++) {
-    memset(IND(ind, linCmtCarryT) + r*cap, 0, (size_t)b->carryNpair*sizeof(double));
+    memset(IND(ind, linCmtCarryT) + r*cap, 0, (size_t)npair*sizeof(double));
   }
   b->carryNpair = 0;
 }
@@ -1915,13 +1926,13 @@ IntegerVector linCmtCarrySentinelMax() {
 //' parameter, eta) pair in rxode2's subject struct; rxode2's
 //' `RX_LINCMT_CARRY_MAXPAIRS` sets how many, and this package indexes them
 //' with that cap.  nlmixr2est keeps a model's carry within it.
-//' @return integer: the cap of the registered rxode2, and 8 before one
-//'   registers
+//' @return integer: the cap of the registered rxode2, at most 32 (the
+//'   most this package supports), and 8 before one registers
 //' @keywords internal
 //' @export
 // [[Rcpp::export(.linCmtCarryMaxPairs)]]
 IntegerVector linCmtCarryMaxPairs() {
-  return IntegerVector::create(LC_CARRY_CAP);
+  return IntegerVector::create(LC_CARRY_NPAIR);
 }
 
 //' Read (and optionally reset) the linCmt() carry-advance fast-path counters
@@ -2008,9 +2019,9 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
   for (int i = 0; i < n; i++) {
     if (which1[i] == -5 || which1[i] == -6 || which1[i] == -7) {
       int pair = which2[i] / m;
-      if (pair < 0 || pair >= LC_CARRY_CAP) {
+      if (pair < 0 || pair >= LC_CARRY_NPAIR) {
         Rcpp::stop("carry pair index %d out of range (which2=%d, m=%d): at most %d simultaneous carry-eligible (linCmt parameter, eta) pairs are supported (the RX_LINCMT_CARRY_MAXPAIRS of rxode2)",
-                   pair, which2[i], m, LC_CARRY_CAP);
+                   pair, which2[i], m, LC_CARRY_NPAIR);
       }
     }
     IND(ind, idx) = i;
@@ -2860,7 +2871,7 @@ static inline double linCmtBcarryAdd(rx_solving_options_ind *ind, int ncmt, int 
   int row = which2 % m;
   int pair = which2 / m;
   int cap = LC_CARRY_CAP;
-  if (which2 < 0 || pair >= cap) return NA_REAL;
+  if (which2 < 0 || pair >= LC_CARRY_NPAIR) return NA_REAL;
   linCmtBind &b = linCmtBindGet(ind);
   if (pair >= b.carryNpair) b.carryNpair = pair + 1;
   IND(ind, linCmtCarryT)[row*cap + pair] += p2;
@@ -2928,8 +2939,7 @@ static inline void linCmtBcarryEvent(rx_solving_options_ind *ind,
   double k = (whI == EVIDF_MULT) ? getDose(ind, kPrev) : 0.0;
   // at the host's stride, over the columns written (linCmtBind's
   // carryNpair): those past it stay 0, which linCmtCarryReset() relies on
-  linCmtBind *b = (linCmtBind*)IND(ind, linCmtBind);
-  int npair = (b == NULL) ? 0 : b->carryNpair;
+  int npair = linCmtCarryNpairUsed((linCmtBind*)IND(ind, linCmtBind));
   int cap = LC_CARRY_CAP;
   for (int p = 0; p < npair; ++p) {
     double &v = IND(ind, linCmtCarryT)[c*cap + p];
@@ -3138,7 +3148,7 @@ static inline double linCmtBcarryAdvance(linB_t &lcb, rx_solve *rx,
   int row = which2 % m;
   int pair = which2 / m;
   int cap = LC_CARRY_CAP;
-  if (which2 < 0 || pair >= cap) return NA_REAL;
+  if (which2 < 0 || pair >= LC_CARRY_NPAIR) return NA_REAL;
   int slot = row*cap + pair;
   if (which1 == -6) return IND(ind, linCmtCarryT)[slot];
   double thNow[7] = {p1, v1, p2, p3, p4, p5, ka};
@@ -3166,7 +3176,7 @@ static inline double linCmtBcarryAdvance(linB_t &lcb, rx_solve *rx,
     linCmtBtransitionColumn(lcb.lc, gF, kaV, ncmt, m, c, colOut);
     for (int r = 0; r < m; r++) localM[r*4 + c] = colOut[r];
   }
-  linCmtBcarryApplyM(ind, localM, m, cap, linCmtBindGet(ind).carryNpair);
+  linCmtBcarryApplyM(ind, localM, m, cap, linCmtCarryNpairUsed(&linCmtBindGet(ind)));
   return IND(ind, linCmtCarryT)[slot];
 }
 

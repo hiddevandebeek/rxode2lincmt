@@ -1,20 +1,20 @@
 # rxode2lincmt (development version)
 
-## Bug fixes
-
-- The `linCmt()` sensitivity carry reads its column count from the
-  registered 'rxode2' at run time (`.linCmtCarryMaxPairs()`) instead of
-  compiling in 8.  Any 'rxode2' with 1 to 32 carry columns works with this
-  package; one with more, or with none, is refused at load with a message.
-  The carry advance also multiplies only the columns a model uses, and the
-  restart at a reset clears only those, at the host's stride.
-
 ## New features
 
 - `linCmtCarryReset()`, slot 9 of the pointer table (read with
   `iniRxode2lincmtCarryReset()`), zeroes only the carry columns a subject
   has written since its last reset, so 'rxode2' need not clear the whole
   array for every subject of every solve.
+
+## Bug fixes
+
+- The `linCmt()` sensitivity carry reads its column count from the
+  registered 'rxode2' at run time (`.linCmtCarryMaxPairs()`) instead of
+  compiling in 8, and uses it as the column stride.  Pairs are bounded by
+  that count, at most 32; a pair past the bound gives `NA`.  Nothing is
+  checked at load.  The carry advance also multiplies only the columns a
+  model uses, and the restart at a reset clears only those.
 
 # rxode2lincmt 0.1.1
 

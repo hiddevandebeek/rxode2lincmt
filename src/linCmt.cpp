@@ -2983,8 +2983,13 @@ static inline bool linCmtBcarryPre(rx_solving_options_ind *ind, rx_solving_optio
 }
 
 // s_new = M * s_old for every pair column (top m rows).  localM is 4x4
-// row-major.
+// row-major.  No FMA contraction: clang (e.g. macOS arm64) may otherwise
+// fuse one specialized copy of the loop and not another, so the solve-buffer
+// and fixed-array carries would differ in the last bits.
 static inline void linCmtBcarryApplyM(const lcCarryV &v, const double *localM, int m) {
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
   for (int c = 0; c < v.npair; c++) {
     double sNew[4];
     for (int r = 0; r < m; r++) {

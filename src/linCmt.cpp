@@ -1946,7 +1946,8 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
   NumericVector out(n);
   NumericVector av = addVal.isNull() ? NumericVector(n, 0.0) : NumericVector(addVal);
   for (int i = 0; i < n; i++) {
-    if (which1[i] == -5 || which1[i] == -6 || which1[i] == -7) {
+    // an impossible shape (m <= 0) is left to linCmtB(), which gives NA
+    if (m > 0 && (which1[i] == -5 || which1[i] == -6 || which1[i] == -7)) {
       int pair = which2[i] / m;
       if (pair < 0 || pair >= npair) {
         Rcpp::stop("carry pair index %d out of range (which2=%d, m=%d): the solved model's carry holds %d pairs",
@@ -3095,7 +3096,8 @@ static void lcCarryProbeRow(lcCarryProbeInd *pind, lcCarryProbeOp *pop, int i,
   double th[7];
   for (int j = 0; j < 7; ++j) th[j] = theta[i + n*j];
   lcCarryV v = lcCarryToRow(ind, op, m, i);
-  if (!linCmtBcarryPre(ind, op, i, m, v, th, (double)i)) {
+  // as linCmtBcarryAdvance(): a row with no carry is not advanced
+  if (v.x != NULL && !linCmtBcarryPre(ind, op, i, m, v, th, (double)i)) {
     double localM[16];
     for (int r = 0; r < m; ++r) {
       for (int c = 0; c < m; ++c) localM[r*4 + c] = M[r + m*c + m*m*i];

@@ -283,4 +283,8 @@ test_that("a row with no carry makes the rest of the subject's carry NA", {
     .carryRun1(.ev, .d, inSolve = TRUE, nAll = 3L),
     c(.carryRun1(.ev, .d)[1:3], rep(NA_real_, 3L))
   )
+  # rows with no carry are not advanced
+  .linCmtCarryFastStats(TRUE)
+  .carryRun1(.ev, .d, inSolve = TRUE, nAll = 3L)
+  expect_equal(.linCmtCarryFastStats(TRUE)[["advCalls"]], 3)
 })

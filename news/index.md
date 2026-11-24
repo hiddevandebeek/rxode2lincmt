@@ -1,5 +1,17 @@
 # Changelog
 
+## rxode2lincmt (development version)
+
+### New features
+
+- The `linCmt()` sensitivity carry is read from rxode2’s solve buffer
+  (`ind->solve`) when rxode2 sends its carry states (the new host-table
+  rows `numLinCarry`, `linCmtCarryRow` and `n_all_times`), sized to each
+  model, so it has no cap;
+  [`.linCmtCarryMaxPairs()`](https://nlmixr2.github.io/rxode2lincmt/reference/dot-linCmtCarryMaxPairs.md)
+  reports `.Machine$integer.max` then. With an rxode2 that does not send
+  them the carry stays in the fixed 8-pair array, as before.
+
 ## rxode2lincmt 0.1.1
 
 ### New features

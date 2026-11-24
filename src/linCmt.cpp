@@ -3700,6 +3700,20 @@ static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
                                    int ncmt, int oral0, bool ad,
                                    Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
   if ((RXS(rx, ndiff) & diffHess) == 0) return;
+  // A step at a record before the last one taken is a new solve of the
+  // subject (an estimator re-solves the same subject at new etas: its
+  // solver starts again from the first record).  The history belongs to
+  // the previous solve -- its parameters, its last record -- so it starts
+  // over -- also when it starts at the record the last one ended on (a
+  // subject with one solved record).  A steady-state solve repeats its
+  // record (doSS) and keeps it.
+  if (wsp.hessLast >= 0 &&
+      (idx < wsp.hessLast || (idx == wsp.hessLast && !IND(ind, doSS)))) {
+    std::fill(wsp.hessHave.begin(), wsp.hessHave.end(), (char)0);
+    wsp.hessLast = -1;
+    wsp.hessCur = -1;
+    wsp.hessUnsupported = -1;
+  }
   if (wsp.hessUnsupported < 0) {
     wsp.hessUnsupported = linCmtSecondOrderUnsupported(ind, op, 0);
   }

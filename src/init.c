@@ -29,6 +29,9 @@ SEXP _rxode2lincmt_linCmtModelDouble(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
                                      SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
                                      SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
                                      SEXP);
+SEXP _rxode2lincmt_linCmtModelHess(SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
+                                   SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP,
+                                   SEXP);
 SEXP _rxode2lincmt_linCmtCarrySetFast(SEXP);
 SEXP _rxode2lincmt_linCmtCarrySentinelMax(void);
 SEXP _rxode2lincmt_linCmtCarryMaxPairs(void);
@@ -53,6 +56,7 @@ static const R_CallMethodDef callMethods[] = {
   {"_rxode2lincmt_linCmtDeltaMemo", (DL_FUNC) &_rxode2lincmt_linCmtDeltaMemo, 1},
   {"_rxode2lincmt_linCmtSeqStats", (DL_FUNC) &_rxode2lincmt_linCmtSeqStats, 1},
   {"_rxode2lincmt_linCmtModelDouble", (DL_FUNC) &_rxode2lincmt_linCmtModelDouble, 22},
+  {"_rxode2lincmt_linCmtModelHess", (DL_FUNC) &_rxode2lincmt_linCmtModelHess, 21},
   {"_rxode2lincmt_linCmtCarrySetFast", (DL_FUNC) &_rxode2lincmt_linCmtCarrySetFast, 1},
   {"_rxode2lincmt_linCmtCarrySentinelMax", (DL_FUNC) &_rxode2lincmt_linCmtCarrySentinelMax, 0},
   {"_rxode2lincmt_linCmtCarryMaxPairs", (DL_FUNC) &_rxode2lincmt_linCmtCarryMaxPairs, 0},

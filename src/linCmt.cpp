@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <climits>
 #include <algorithm>
+#include <vector>
 #include "lcOmp.h"
 #include "lcHost.h"
 #include "linCmt.h"
@@ -383,6 +384,41 @@ typedef struct linCmtBind_s {
   int memoIdx = -1, memoFlag = -1, memoDoSS = -1, memoHpar = -9;
   double memoT = 0.0, memoH = 0.0, memoHV = 0.0, memoVal = 0.0;
   double memoArgs[7] = {0, 0, 0, 0, 0, 0, 0};
+  // Second-order history (diffHess models), per record idx: the m amount Hessians
+  // (m*n*n, the quadratic carry for the next record) then the central
+  // concentration Hessian (n*n).  Filled on each solved row, read back on
+  // restore rows; hessCur is the record the which1 = -20 reads serve.
+  std::vector<double> hessHist;
+  std::vector<unsigned char> hessHave;
+  int hessStride = 0, hessCur = -1;
+  // -1 not yet checked; 1 when this subject's doses take carry paths the
+  // Hessian does not follow (origin redistribution, replace/multiply).
+  int hessUnsupported = -1;
+  int hessLast = -1; // record of the last second-order step taken
+  // Set by linCmtFreeInd(): the subject is being released, not reset.
+  int finalFree = 0;
+  // The parameters of the last second-order step: the quadratic carry
+  // expands around one parameter vector, so a change between steps (a
+  // time-varying covariate) is a carry this does not follow.
+  double hessTheta[7] = {0, 0, 0, 0, 0, 0, 0};
+  // eta-space second-order carry (which1 = -30 .. -36; time-varying
+  // parameters): this row's dp/deta and d2p/deta2 per slot, the carried
+  // amounts' eta gradient/Hessian and the last row's concentration ones.
+  int etaN = 0, etaPrevIdx = -1, etaValid = 1, etaScan = -1;
+  double etaTlast = NAN;
+  std::vector<double> etaG, etaGG, etaS1, etaS2, etaC1, etaC2;
+  // this row's dF_c/deta and d2F_c/deta2 per linear compartment c (-37/-38):
+  // a bolus into c on this row enters as F(eta)*amt
+  std::vector<double> etaF1, etaF2;
+  // the parameters the solve advanced each record with (7 per record), and
+  // the previous row's local parameter model (p, dp/deta, d2p/deta2): which
+  // row's parameters govern an interval depends on the covariate
+  // interpolation, so the advance uses the one the solve actually used
+  std::vector<double> solveTh;
+  std::vector<unsigned char> solveThHave;
+  double etaPprev[7] = {0, 0, 0, 0, 0, 0, 0};
+  std::vector<double> etaGprev, etaGGprev;
+  int etaHavePrev = 0;
 } linCmtBind;
 
 // Allocated on first touch inside the solve; released with the subject in
@@ -409,9 +445,38 @@ static inline linCmtBind &linCmtBindGet(rx_solving_options_ind *ind) {
   return *((linCmtBind*)(IND(ind, linCmtBind)));
 }
 
+// rxode2 calls this both to reset the subject's state at a steady-state solve
+// (invalidating the value memo and window) and, after linCmtFreeInd(), to
+// release it.  A reset keeps the second-order history: it is the record's
+// carried curvature, which a steady-state solve advances through (its state
+// buffers survive the reset too).
 extern "C" void linCmtBindFree(rx_solving_options_ind *ind) {
   if (IND(ind, linCmtBind) != NULL) {
-    delete ((linCmtBind*)(IND(ind, linCmtBind)));
+    linCmtBind *b = (linCmtBind*)(IND(ind, linCmtBind));
+    if (!b->finalFree && (b->hessStride > 0 || !b->etaS1.empty())) {
+      linCmtBind keep;
+      keep.hessHist.swap(b->hessHist);
+      keep.hessHave.swap(b->hessHave);
+      keep.hessStride = b->hessStride;
+      keep.hessCur = b->hessCur;
+      keep.hessLast = b->hessLast;
+      keep.hessUnsupported = b->hessUnsupported;
+      memcpy(keep.hessTheta, b->hessTheta, sizeof(keep.hessTheta));
+      keep.etaN = b->etaN; keep.etaPrevIdx = b->etaPrevIdx;
+      keep.etaValid = b->etaValid; keep.etaScan = b->etaScan;
+      keep.etaTlast = b->etaTlast;
+      keep.etaG.swap(b->etaG); keep.etaGG.swap(b->etaGG);
+      keep.etaS1.swap(b->etaS1); keep.etaS2.swap(b->etaS2);
+      keep.etaC1.swap(b->etaC1); keep.etaC2.swap(b->etaC2);
+      keep.etaF1.swap(b->etaF1); keep.etaF2.swap(b->etaF2);
+      keep.solveTh.swap(b->solveTh); keep.solveThHave.swap(b->solveThHave);
+      memcpy(keep.etaPprev, b->etaPprev, sizeof(keep.etaPprev));
+      keep.etaGprev.swap(b->etaGprev); keep.etaGGprev.swap(b->etaGGprev);
+      keep.etaHavePrev = b->etaHavePrev;
+      *b = std::move(keep);
+      return;
+    }
+    delete b;
     IND(ind, linCmtBind) = NULL;
   }
 }
@@ -422,6 +487,9 @@ std::vector<linB_t> __linCmtB;
 // history are realloc'd in this DLL, so they are freed here too; rxode2 calls
 // this from rxFreeInd (a free() in its DLL could use a different heap).
 extern "C" void linCmtFreeInd(rx_solving_options_ind *ind) {
+  if (IND(ind, linCmtBind) != NULL) {
+    ((linCmtBind*)(IND(ind, linCmtBind)))->finalFree = 1; // released next
+  }
   free(IND(ind, linCmtRateHist));
   IND(ind, linCmtRateHist) = NULL;
   IND(ind, linCmtRateHistCap) = 0;
@@ -1817,6 +1885,82 @@ RObject linCmtModelDouble(double dt,
   delete[] r;
   delete[] asave;
   return retList;
+}
+
+//' Advance a linear compartment model one step with exact Hessians
+//'
+//' Like [linCmtModelDouble()] with `deriv = TRUE`, but also carries and
+//' returns the Hessian of each amount, and of the central concentration,
+//' with respect to the full parameter vector `(p1, v1, ..., ka)`, by nested
+//' forward-mode automatic differentiation (rxode2lincmt#17).
+//'
+//' @inheritParams linCmtModelDouble
+//' @param alastH Hessians of the starting amounts: `m * n * n` values, one
+//'   column-major `n x n` block per amount (`m` amounts, `n` parameters)
+//' @param quadCarry logical; use the quadratic carry-forward of the starting
+//'   amounts.  `FALSE` uses the linear carry of the first-order path.
+//' @return list with `val` (central concentration), `Jg` (its gradient),
+//'   `Hc` (its `n x n` Hessian), `fx` (amounts after the step), `J`
+//'   (`m x n` Jacobian), `H` (`n x n x m` array of amount Hessians) and
+//'   `Alast` (carried state for the next call)
+//' @keywords internal
+//' @export
+// [[Rcpp::export]]
+List linCmtModelHess(double dt,
+                     double p1, double v1, double p2,
+                     double p3, double p4, double p5,
+                     double ka,
+                     NumericVector alastNV, NumericVector alastH,
+                     NumericVector rateNV,
+                     const int ncmt, const int oral0, const int trans,
+                     int type = 0, double tau = 0.0, double tinf = 0.0,
+                     double amt = 0.0, int bolusCmt = 0, int ndiff = 0,
+                     bool quadCarry = true) {
+  stan::math::linCmtStan lc(ncmt, oral0, trans, true, type, ndiff);
+  if (type == linCmtSsInf) {
+    lc.setSsInf(tinf, tau);
+  } else if (type == linCmtSsBolus) {
+    lc.setSsBolus(amt, tau, bolusCmt);
+  }
+  Eigen::Matrix<double, -1, 1> alast0 = as<Eigen::Matrix<double, -1, 1> >(alastNV);
+  Eigen::Matrix<double, -1, 1> rate = as<Eigen::Matrix<double, -1, 1> >(rateNV);
+  int nAlast = lc.getNalast();
+  int m = ncmt + oral0, n = 2*ncmt + oral0;
+  if (alast0.size() != nAlast) {
+    Rcpp::stop("alastNV size needs to be %d", nAlast);
+  }
+  if (alastH.size() != m*n*n) {
+    Rcpp::stop("alastH size needs to be %d", m*n*n);
+  }
+  Eigen::Matrix<double, -1, 1> theta0(lc.getNpars());
+  Eigen::Map<Eigen::Matrix<double, -1, 1>> theta(theta0.data(), theta0.size());
+  linCmtFillTheta(theta, ncmt, oral0, p1, v1, p2, p3, p4, p5, ka);
+
+  std::vector<double> a(nAlast), asave(nAlast), r(lc.getNrate());
+  lc.setPtr(a.data(), r.data(), asave.data());
+  lc.setAlast(alast0, nAlast);
+  lc.setRate(rate.data());
+  lc.setDt(dt);
+  lc.resizeModel();
+
+  Eigen::Matrix<double, -1, 1> fx;
+  Eigen::Matrix<double, -1, -1> J;
+  NumericVector H(m*n*n);
+  NumericMatrix Hc(n, n);
+  lc.linCmtFwdHess(theta0, &alastH[0], quadCarry, fx, J, &H[0], &Hc[0]);
+  H.attr("dim") = IntegerVector::create(n, n, m);
+  for (int i = 0; i < m; i++) asave[i] = fx(i);
+  lc.saveJac(J);
+  Eigen::Matrix<double, -1, 1> Jg(n);
+  lc.getJacCp(J, fx, theta, Jg);
+  double val = lc.adjustF(fx, theta);
+  return List::create(_["val"] = wrap(val),
+                      _["Jg"] = wrap(Jg),
+                      _["Hc"] = Hc,
+                      _["fx"] = wrap(fx),
+                      _["J"] = wrap(J),
+                      _["H"] = H,
+                      _["Alast"] = linCmtModelDoubleAlast(asave.data(), nAlast));
 }
 
 // Phase 3b.4 runtime fast-path state for the which1=-5 carry advance (see
@@ -3450,6 +3594,162 @@ static inline void linCmtBjac(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
   lcb.lc.saveJac(lcb.J);
 }
 
+// ---- Second-order linCmtB() (rxode2lincmt#17) ----------------------------
+//
+// When the model reads a Hessian (the parser sets diffHess in ndiff), every
+// row linCmtB() solves also takes one nested forward-mode step
+// (linCmtStan::linCmtFwdHess) from the same kernel state its Jacobian uses --
+// the previous record's amounts, Jacobian and Hessians, dt, rate and
+// steady-state setup -- and every row it restores serves the kept history.
+// The Hessian follows the first-order carry by living in the same code path;
+// a carry path it does not mirror makes the reads NA, never stale.
+//
+//   which1 = -20, which2 = row*49 + k*7 + l   d2(amount row)/dk dl
+//   which1 = -21, which2 = k*7 + l            d2(central conc)/dk dl
+//
+// over the full parameter order (p1, v1, p2, p3, p4, p5, ka; ka at 2*ncmt).
+// NA: finite-difference sensType, H-perturbed probe rows, and subjects whose
+// linCmt() doses use origin redistribution (modeled F/lag/rate/dur) or
+// replace/multiply records.
+
+// Doses whose input the second-order carries do not follow: a modeled lag,
+// rate or duration (they move or reshape the input in time), replace and
+// multiply records, and (ss != NULL) steady state.  A modeled bioavailability
+// is not among them: it scales a dose amount, which carries no dependence on
+// the PK parameters (the eta-space carry adds its own eta dependence as a
+// jump).  rxode2 sets linCmtOriginMask for any modeled input, F included, so
+// that mask is not the test.
+static inline int linCmtSecondOrderUnsupported(rx_solving_options_ind *ind,
+                                               rx_solving_options *op,
+                                               int ssCounts) {
+  int dosed = 0, ssInf = 0, rm = 0;
+  linCmtDoseScan(ind, op, &dosed, &ssInf, NULL, &rm);
+  if (rm || (ssCounts && ssInf)) return 1;
+  if (OPT(op, linCmtLagMask) != 0) return 1;
+  for (int i = 0; i < IND(ind, ndoses); ++i) {
+    int wh, cmt, wh100, whI, wh0;
+    getWh(getEvid(ind, IND(ind, idose)[i]), &wh, &cmt, &wh100, &whI, &wh0);
+    if (whI == EVIDF_MODEL_DUR_ON || whI == EVIDF_MODEL_DUR_OFF ||
+        whI == EVIDF_MODEL_RATE_ON || whI == EVIDF_MODEL_RATE_OFF) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The history slot of record idx (grown on demand).
+static inline double *linCmtBhessSlot(linCmtBind &wsp, int idx, int ncmt, int oral0) {
+  int m = ncmt + oral0, n = 2*ncmt + oral0;
+  int stride = m*n*n + n*n;
+  if (wsp.hessStride != stride) {
+    wsp.hessHist.clear();
+    wsp.hessHave.clear();
+    wsp.hessStride = stride;
+  }
+  if ((int)wsp.hessHave.size() <= idx) {
+    wsp.hessHist.resize((size_t)(idx + 1)*stride, 0.0);
+    wsp.hessHave.resize(idx + 1, 0);
+  }
+  return &wsp.hessHist[(size_t)idx*stride];
+}
+
+// The record whose Hessians hold at record idx: idx itself once solved,
+// otherwise the latest earlier solved record -- a record rxode2 does not
+// solve (one at the same time as the previous) carries that record's state
+// forward unchanged, Jacobian included, and doses add parameter-free amounts.
+// -1: nothing solved yet, the parameter-free initial conditions.
+static inline int linCmtBhessFrom(linCmtBind &wsp, int idx) {
+  for (int i = idx < (int)wsp.hessHave.size() ? idx : (int)wsp.hessHave.size() - 1;
+       i >= 0; --i) {
+    if (wsp.hessHave[i]) return i;
+  }
+  return -1;
+}
+
+// A row linCmtB() restores: serve the record's Hessians.  hessHave is 1 for
+// a solved record, 2 for one marked NA; a record that inherits from an NA
+// one is NA too.  With nothing solved yet, only the first record (its
+// parameter-free initial conditions) has a Hessian, zero; any later one was
+// advanced by a path that kept no Hessians, so it is NA rather than a
+// silent zero.
+static inline void linCmtBhessRestore(rx_solve *rx, linCmtBind &wsp, int idx,
+                                      int ncmt, int oral0) {
+  if ((RXS(rx, ndiff) & diffHess) == 0) return;
+  double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
+  int from = linCmtBhessFrom(wsp, idx);
+  if (from < 0) {
+    if (idx > 0) {
+      wsp.hessCur = -1;
+      return;
+    }
+    std::fill(slot, slot + wsp.hessStride, 0.0);
+    from = idx; // zeros, served from this slot but not marked solved
+  } else if (wsp.hessHave[from] == 2) {
+    wsp.hessCur = -1;
+    return;
+  }
+  wsp.hessCur = from;
+}
+
+// A row linCmtB() solves, called with the kernel state set for the row and
+// before the Jacobian (a steady-state re-solve may overwrite the prior
+// amounts).  ad: the row takes the AD Jacobian path.
+static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
+                                   rx_solving_options_ind *ind,
+                                   rx_solving_options *op, int idx,
+                                   int ncmt, int oral0, bool ad,
+                                   Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
+  if ((RXS(rx, ndiff) & diffHess) == 0) return;
+  if (wsp.hessUnsupported < 0) {
+    wsp.hessUnsupported = linCmtSecondOrderUnsupported(ind, op, 0);
+  }
+  double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
+  // Parameters that change between steps (time-varying covariates): the
+  // quadratic carry is an expansion around one parameter vector, so the
+  // subject's Hessians are NA from the change on.
+  if (wsp.hessLast >= 0 && wsp.hessUnsupported == 0) {
+    for (int i = 0; i < theta.size() && i < 7; i++) {
+      if (!linCmtSameBits(theta(i), wsp.hessTheta[i])) {
+        wsp.hessUnsupported = 1;
+        break;
+      }
+    }
+  }
+  for (int i = 0; i < theta.size() && i < 7; i++) wsp.hessTheta[i] = theta(i);
+  if (!ad || !linCmtSensIsAD(RXS(rx, sensType)) || wsp.hessUnsupported) {
+    wsp.hessHave[idx] = 2; // NA, and so is anything inheriting from it
+    wsp.hessCur = -1;
+    return;
+  }
+  int m = ncmt + oral0, n = 2*ncmt + oral0;
+  // The prior Hessians are those of the last step taken.  The solver always
+  // advances from the most recent state -- record by record (in place, so
+  // the buffer pointer does not say which step wrote it), through same-time
+  // records it copies forward, through steady-state iterations on one
+  // record, and from a steady-state bolus's closed-form pass into its
+  // advance -- exactly as the Jacobian it carries.  None yet in this solve:
+  // the parameter-free initial conditions.  It can be this record's own
+  // slot, which the step overwrites, so that is copied first.
+  int from = (wsp.hessLast >= 0 && wsp.hessLast < (int)wsp.hessHave.size() &&
+              wsp.hessHave[wsp.hessLast] == 1) ? wsp.hessLast : -1;
+  std::vector<double> HprevCopy;
+  const double *Hprev = NULL;
+  if (from >= 0) {
+    Hprev = &wsp.hessHist[(size_t)from*wsp.hessStride];
+    if (from == idx) {
+      HprevCopy.assign(Hprev, Hprev + wsp.hessStride);
+      Hprev = HprevCopy.data();
+    }
+  }
+  Eigen::Matrix<double, Eigen::Dynamic, 1> th0 = theta;
+  Eigen::Matrix<double, Eigen::Dynamic, 1> fx;
+  Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> J;
+  lcb.lc.linCmtFwdHess(th0, Hprev, true, fx, J, slot, slot + (size_t)m*n*n);
+  wsp.hessHave[idx] = 1;
+  wsp.hessCur = idx;
+  wsp.hessLast = idx;
+}
+
 // Fill the row's fx/J: restore an already-solved idx (or the lhs pass),
 // otherwise advance the kernel from the previous state over dt and take
 // the Jacobian.  ind->tprior is the prior solved time, ind->tout the time
@@ -3466,12 +3766,25 @@ static inline void linCmtBsolveRow(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
     double *acur = getAdvan(idx);
     lcb.lc.restoreJacTo(acur, lcb.J);
     lcb.lc.restoreFxTo(acur, lcb.fx);
+    linCmtBhessRestore(rx, wsp, idx, ncmt, oral0);
     return;
   }
 #pragma omp atomic
   linCmtValCompN++;
   lcb.lc.setDt(IND(ind, doSS) ? (IND(ind, tout) - IND(ind, tprior)) : (_t - IND(ind, tprior)));
-  if (RXS(rx, ndiff) != 0 && IND(ind, linCmtHparIndex) < -1) {
+  if (IND(ind, linCmtHparIndex) < -1 && idx >= 0) {
+    // the parameters this record is advanced with (the eta-space carry
+    // matches its interval's parameters against them)
+    if ((int)wsp.solveThHave.size() <= idx) {
+      wsp.solveTh.resize((size_t)(idx + 1)*7, 0.0);
+      wsp.solveThHave.resize(idx + 1, 0);
+    }
+    for (int i = 0; i < 7; i++) wsp.solveTh[(size_t)idx*7 + i] = i < theta.size() ? theta(i) : 0.0;
+    wsp.solveThHave[idx] = 1;
+  }
+  bool adRow = RXS(rx, ndiff) != 0 && IND(ind, linCmtHparIndex) < -1;
+  linCmtBhessStep(lcb, wsp, rx, ind, op, idx, ncmt, oral0, adRow, theta);
+  if (adRow) {
     linCmtBjac(lcb, wsp, rx, ind, RXS(rx, sensType), id, idx, theta, thetaSens);
     return;
   }
@@ -3575,6 +3888,7 @@ static double linCmtBlite(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
                     IND(ind, linCmtAlast));
   }
   lcb.lc.restoreFxTo(getAdvan(idx), lcb.fx);
+  linCmtBhessRestore(rx, wsp, idx, ncmt, oral0);
   double val = lcb.lc.adjustF(lcb.fx, thetaL, IND(ind, linCmtHV));
 #pragma omp atomic
   linCmtValLiteN++;
@@ -3678,6 +3992,16 @@ static LINCMT_NOINLINE double linCmtBbody(linB_t &lcb, linCmtBind &wsp, rx_solve
                     p1, v1, p2, p3, p4, p5, ka);
 }
 
+// Second-order reads (see linCmtBhessStep), defined at the end of this file.
+static double linCmtBhessRead(linCmtBind &wsp, int ncmt, int oral0,
+                              int which1, int which2);
+// eta-space second-order carry sentinels (which1 = -30 .. -36)
+static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
+                                 linCmtBind &wsp, double _t, int ncmt, int oral0,
+                                 int which1, int which2, int trans,
+                                 double p1, double v1, double p2, double p3,
+                                 double p4, double p5, double ka);
+
 extern "C" double linCmtB(rx_solve *rx, int id,
                           double _t, int linCmt,
                           int ncmt, int oral0,
@@ -3706,6 +4030,13 @@ extern "C" double linCmtB(rx_solve *rx, int id,
   // belongs to the individual, none of the keys below need the subject id
   // any more -- this block IS the subject.
   linCmtBind &wsp = linCmtBindGet(ind);
+  if (which1 == -20 || which1 == -21) {
+    return linCmtBhessRead(wsp, ncmt, oral0, which1, which2);
+  }
+  if (which1 <= -30 && which1 >= -38) {
+    return linCmtBetaSentinel(rx, ind, wsp, _t, ncmt, oral0, which1, which2, trans,
+                              p1, v1, p2, p3, p4, p5, ka);
+  }
   int idx = IND(ind, idx);
   if (which1 == -1 && which2 == -1 &&
       lcb.lc.isSame(ncmt, oral0, trans, RXS(rx, ndiff))) {
@@ -3734,4 +4065,221 @@ extern "C" double linCmtB(rx_solve *rx, int id,
   }
   return linCmtBbody(lcb, wsp, rx, ind, id, idx, _t, ncmt, oral0, which1, which2,
                      trans, p1, v1, p2, p3, p4, p5, ka);
+}
+
+// Second-order reads (see linCmtBhessStep).
+static double linCmtBhessRead(linCmtBind &wsp, int ncmt, int oral0,
+                              int which1, int which2) {
+  int m = ncmt + oral0, n = 2*ncmt + oral0;
+  if (which2 < 0 || wsp.hessCur < 0 || wsp.hessStride != m*n*n + n*n) {
+    return NA_REAL;
+  }
+  const double *row = &wsp.hessHist[(size_t)wsp.hessCur*wsp.hessStride];
+  int r = 0, kl = which2;
+  if (which1 == -20) {
+    r = which2 / 49;
+    kl = which2 % 49;
+    if (r >= m) return NA_REAL;
+  } else {
+    row += (size_t)m*n*n; // concentration block
+  }
+  int k = kl / 7, l = kl % 7;
+  if (k >= n || l >= n) return NA_REAL;
+  return row[(size_t)r*n*n + k + l*n];
+}
+
+// ---- eta-space second-order carry (time-varying parameters) ---------------
+//
+// The quadratic carry of linCmtBhessStep() is an expansion around one
+// parameter vector, so it does not follow parameters that change between
+// records.  This carry is in eta instead: each row brings its own local
+// parameter model and the step is differentiated through it
+// (linCmtStan::linCmtEtaStep), giving the exact d/deta and d2/deta2 of the
+// amounts and the concentration, whatever the parameters do between rows.
+// Driven by sentinels the generated model emits once per row, in order:
+//
+//   which1 = -30, which2 = k*16 + a          set dp_k/deta_a        (value: p2)
+//   which1 = -31, which2 = (k*16 + a)*16 + b set d2p_k/deta_a deta_b (value: p2)
+//   which1 = -32                             advance to this row (args = p)
+//   which1 = -33, which2 = a                 read dC/deta_a
+//   which1 = -34, which2 = a*16 + b          read d2C/deta_a deta_b
+//   which1 = -35, which2 = r*16 + a          read d(amount r)/deta_a
+//   which1 = -36, which2 = (r*16 + a)*16 + b read d2(amount r)/deta_a deta_b
+//   which1 = -37, which2 = c*16 + a          set dF_c/deta_a        (value: p2)
+//   which1 = -38, which2 = (c*16 + a)*16 + b set d2F_c/deta_a deta_b (value: p2)
+//
+// A bolus into linear compartment c on a row enters as F_c(eta)*amt: after
+// the advance to that row its eta derivatives, amt*dF_c and amt*d2F_c, are
+// the jump added to the carried state (the solved amounts already hold
+// the dose).  F and its derivatives are set on the row, before the
+// advance; they are row-local, so the generated model sets them on every
+// row.
+//
+// k is the full parameter slot (p1, v1, p2, p3, p4, p5, ka at 2*ncmt).  The
+// advance takes the interval from its own previous invocation and the prior
+// amounts from the record it last advanced to, as the first-order carry
+// (which1 = -5) does; a record index going backwards is a new pass.  Reads
+// are NA for subjects whose doses take paths this does not follow (steady
+// state, modeled lag/rate/duration (the origin redistribution),
+// replace/multiply).
+#define RX_LINCMT_ETA_MAX 16
+
+static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
+                                 linCmtBind &wsp, double _t, int ncmt, int oral0,
+                                 int which1, int which2, int trans,
+                                 double p1, double v1, double p2, double p3,
+                                 double p4, double p5, double ka) {
+  rx_solving_options *op = RXS(rx, op);
+  const int E = RX_LINCMT_ETA_MAX;
+  int m = ncmt + oral0, n = 2*ncmt + oral0;
+  if (wsp.etaG.empty()) {
+    wsp.etaG.assign((size_t)7*E, 0.0);
+    wsp.etaGG.assign((size_t)7*E*E, 0.0);
+    wsp.etaS1.assign((size_t)4*E, 0.0);
+    wsp.etaS2.assign((size_t)4*E*E, 0.0);
+    wsp.etaC1.assign((size_t)E, 0.0);
+    wsp.etaC2.assign((size_t)E*E, 0.0);
+    wsp.etaF1.assign((size_t)4*E, 0.0);
+    wsp.etaF2.assign((size_t)4*E*E, 0.0);
+  }
+  switch (which1) {
+  case -30: {
+    int k = which2 / E, a = which2 % E;
+    if (which2 < 0 || k >= 7) return 0.0;
+    wsp.etaG[k*E + a] = p2;
+    if (a + 1 > wsp.etaN) wsp.etaN = a + 1;
+    return 0.0;
+  }
+  case -31: {
+    int b = which2 % E, ka_ = which2 / E, a = ka_ % E, k = ka_ / E;
+    if (which2 < 0 || k >= 7) return 0.0;
+    wsp.etaGG[(k*E + a)*E + b] = p2;
+    wsp.etaGG[(k*E + b)*E + a] = p2;
+    int mx = a > b ? a : b;
+    if (mx + 1 > wsp.etaN) wsp.etaN = mx + 1;
+    return 0.0;
+  }
+  case -37: {
+    int c = which2 / E, a = which2 % E;
+    if (which2 < 0 || c >= 4) return 0.0;
+    wsp.etaF1[c*E + a] = p2;
+    if (a + 1 > wsp.etaN) wsp.etaN = a + 1;
+    return 0.0;
+  }
+  case -38: {
+    int b = which2 % E, ca = which2 / E, a = ca % E, c = ca / E;
+    if (which2 < 0 || c >= 4) return 0.0;
+    wsp.etaF2[(c*E + a)*E + b] = p2;
+    wsp.etaF2[(c*E + b)*E + a] = p2;
+    int mx = a > b ? a : b;
+    if (mx + 1 > wsp.etaN) wsp.etaN = mx + 1;
+    return 0.0;
+  }
+  case -33:
+    return (wsp.etaValid && which2 >= 0 && which2 < E) ? wsp.etaC1[which2] : NA_REAL;
+  case -34:
+    return (wsp.etaValid && which2 >= 0 && which2 < E*E) ? wsp.etaC2[which2] : NA_REAL;
+  case -35: {
+    if (!wsp.etaValid || which2 < 0 || which2 / E >= m) return NA_REAL;
+    return wsp.etaS1[which2];
+  }
+  case -36: {
+    if (!wsp.etaValid || which2 < 0 || which2 / (E*E) >= m) return NA_REAL;
+    return wsp.etaS2[which2];
+  }
+  case -32:
+    break;
+  default:
+    return NA_REAL;
+  }
+  // ---- advance ----
+  if (wsp.etaScan < 0) {
+    wsp.etaScan = linCmtSecondOrderUnsupported(ind, op, 1);
+    if (wsp.etaScan) wsp.etaValid = 0;
+  }
+  int idx = IND(ind, idx);
+  bool restart = wsp.etaPrevIdx < 0 || idx < wsp.etaPrevIdx ||
+    (!ISNAN(wsp.etaTlast) && _t < wsp.etaTlast) ||
+    (idx >= 0 && getEvid(ind, IND(ind, ix)[idx]) == 3);
+  if (restart) {
+    std::fill(wsp.etaS1.begin(), wsp.etaS1.end(), 0.0);
+    std::fill(wsp.etaS2.begin(), wsp.etaS2.end(), 0.0);
+    wsp.etaTlast = NAN;
+    wsp.etaHavePrev = 0;
+  }
+  double dt = ISNAN(wsp.etaTlast) ? 0.0 : (_t - wsp.etaTlast);
+  int from = (wsp.etaPrevIdx >= 0 && !restart) ? wsp.etaPrevIdx : idx;
+  wsp.etaTlast = _t;
+  wsp.etaPrevIdx = idx;
+  int nE = wsp.etaN;
+  stan::math::linCmtStan lc(ncmt, oral0, trans, true, linCmtNormal, 0);
+  Eigen::Matrix<double, -1, 1> th(lc.getNpars());
+  linCmtFillTheta(th, ncmt, oral0, p1, v1, p2, p3, p4, p5, ka);
+  // This row's local parameter model becomes the "previous" one for the
+  // next interval; keep a copy before choosing.
+  std::vector<double> Gcur = wsp.etaG, GGcur = wsp.etaGG;
+  double Pcur[7];
+  for (int i = 0; i < 7; i++) Pcur[i] = i < th.size() ? th(i) : 0.0;
+  const double *Guse = wsp.etaG.data(), *GGuse = wsp.etaGG.data();
+  if (nE > 0 && wsp.etaValid && dt != 0.0 && idx >= 0 &&
+      idx < (int)wsp.solveThHave.size() && wsp.solveThHave[idx]) {
+    const double *sth = &wsp.solveTh[(size_t)idx*7];
+    bool cur = true, prev = wsp.etaHavePrev != 0;
+    for (int i = 0; i < th.size(); i++) {
+      if (!linCmtSameBits(sth[i], Pcur[i])) cur = false;
+      if (prev && !linCmtSameBits(sth[i], wsp.etaPprev[i])) prev = false;
+    }
+    if (!cur && prev) {
+      // the solve advanced this interval with the previous row's parameters
+      // (locf): use that row's local parameter model
+      for (int i = 0; i < th.size(); i++) th(i) = wsp.etaPprev[i];
+      Guse = wsp.etaGprev.data();
+      GGuse = wsp.etaGGprev.data();
+    } else if (!cur) {
+      wsp.etaValid = 0; // parameters the carry cannot attribute
+    }
+  }
+  memcpy(wsp.etaPprev, Pcur, sizeof(Pcur));
+  wsp.etaGprev.swap(Gcur);
+  wsp.etaGGprev.swap(GGcur);
+  wsp.etaHavePrev = 1;
+  if (nE == 0 || !wsp.etaValid) return 0.0;
+  const double *A = getAdvan(from);
+  const double *r = linCmtBcarryRate(ind, op, idx);
+  lc.setRate(const_cast<double*>(r));
+  lc.setDt(dt);
+  std::vector<double> S1n((size_t)4*E, 0.0), S2n((size_t)4*E*E, 0.0);
+  double val = 0.0;
+  lc.linCmtEtaStep(th, A, nE, E, Guse, GGuse,
+                   wsp.etaS1.data(), wsp.etaS2.data(), S1n.data(), S2n.data(),
+                   wsp.etaC1.data(), wsp.etaC2.data(), &val);
+  (void)n;
+  wsp.etaS1.swap(S1n);
+  wsp.etaS2.swap(S2n);
+  // A bolus on this row: its eta dependence through F joins the state
+  // (amounts first, depot included when oral).  Infusions with a modeled F
+  // are not followed: they are excluded by the origin redistribution gate
+  // only when nlmixr2est marks them, so refuse them here as well.
+  if (idx >= 0) {
+    int evid = getEvid(ind, IND(ind, ix)[idx]);
+    int wh, cmt, wh100, whI, wh0;
+    getWh(evid, &wh, &cmt, &wh100, &whI, &wh0);
+    int c = cmt - OPT(op, linOffset);
+    if (evid >= 100 && c >= 0 && c < m) { // an encoded dose record
+      if (whI == EVIDF_NORMAL && wh0 == EVID0_REGULAR) {
+        double amt = getDose(ind, IND(ind, ix)[idx]);
+        for (int a = 0; a < nE; a++) {
+          wsp.etaS1[c*E + a] += amt*wsp.etaF1[c*E + a];
+          for (int b = 0; b < nE; b++) {
+            wsp.etaS2[(c*E + a)*E + b] += amt*wsp.etaF2[(c*E + a)*E + b];
+          }
+        }
+      } else {
+        bool anyF = false;
+        for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
+        if (anyF) wsp.etaValid = 0; // a modeled F on an infusion
+      }
+    }
+  }
+  return 0.0;
 }

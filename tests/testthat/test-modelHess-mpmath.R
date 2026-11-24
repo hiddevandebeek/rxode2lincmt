@@ -2,11 +2,11 @@
 # the central concentration's value, gradient and Hessian for 1-3
 # compartments, bolus / infusion / oral, single dose and steady state.
 #
-# Only the generic cases are checked.  At confluence -- ka within 1% of a
-# disposition rate, a near-zero elimination (k t < 1e-4), a near-double root --
-# the closed forms themselves lose accuracy (already in the first-order path:
-# the value and gradient go wrong there too), a separate issue from the
-# second-order work.
+# The generic cases are held to the closed forms' accuracy; the confluent ones
+# -- ka within 1% of a disposition rate, a near-zero elimination, a
+# near-double root -- go through the generator exponential (#18) and are held
+# to their own (looser on the steady-state Hessian, which solves
+# (I - exp(A tau)) x = d).
 
 .mpmathCases <- function() {
   .ref <- readLines(test_path("fixtures", "closed_form_mpmath.txt"))
@@ -131,5 +131,19 @@ test_that("the steady-state infusion kernel matches repeated dosing", {
     md <- .step(.nx(.step(st, cs$dur, rt)), cs$t - cs$dur, rep(0, m))
     expect_lt(.relErr(ss$val, md$val), 1e-12)
     expect_lt(.relErr(ss$Hc, md$Hc), 1e-10)
+  }
+})
+
+test_that("linCmtModelHess matches the 60-digit reference at confluence (#18)", {
+  conf <- Filter(.mpmathConfluent, .mpmathCases())
+  expect_gte(length(conf), 100)
+  for (cs in conf) {
+    r <- .mpmathEval(cs)
+    n <- length(cs$p)
+    ut <- unlist(lapply(seq_len(n), function(i) r$Hc[i, i:n]))
+    expect_true(all(is.finite(ut)))
+    expect_lt(.relErr(r$val, cs$value), 1e-10)
+    expect_lt(.relErr(as.vector(r$Jg)[seq_len(n)], cs$grad), 1e-9)
+    expect_lt(.relErr(ut, cs$hess), 1e-6)
   }
 })

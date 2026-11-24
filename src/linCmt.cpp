@@ -1403,6 +1403,18 @@ static bool linCmtSeqTailJac(linB_t &lcb, linCmtBind &wsp, int phiCtl,
       w.npars != npars || memcmp(w.theta, thetaD, npars*sizeof(double)) != 0) {
     linCmtWinFill(lc, w, thetaD, ncmt, oral0, trans);
   }
+  {
+    // The window's tails use the closed forms; a row in a confluence band
+    // (nlmixr2/rxode2lincmt#18) takes the full path, which routes it through
+    // the generator.  Same rule as linCmtStan{1,2,3}.
+    double L[3];
+    if (ncmt == 1) L[0] = w.k10;
+    else for (int i = 0; i < ncmt; i++) L[i] = w.L[i];
+    if (lc.dt_ > 0.0 &&
+        stan::math::linCmtStan::linCmtRateBand(L, ncmt, oral0 != 0, w.ka, true, lc.dt_)) {
+      return false;
+    }
+  }
   // One delta-memo lookup per row; every requested direction reuses the
   // slot (the exponentials are shared, only the tangent differs by j).
   int memoOn = (linCmtDeltaMemoForce >= 0) ? linCmtDeltaMemoForce : w.deltaMemoOn;

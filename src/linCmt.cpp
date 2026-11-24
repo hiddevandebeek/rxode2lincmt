@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <climits>
 #include <algorithm>
 #include "lcOmp.h"
 #include "lcHost.h"
@@ -1842,6 +1843,22 @@ IntegerVector linCmtCarrySentinelMax() {
   return IntegerVector::create(8L);
 }
 
+static inline bool lcCarryInSolve(void);
+
+//' Carry pairs a linCmt() model can carry at once
+//'
+//' With an rxode2 that keeps the carry in its solve buffer the carry is
+//' sized to each model, so there is no cap and this is
+//' `.Machine$integer.max`; with an older rxode2 it is the fixed array's 8.
+//' nlmixr2est keeps a model's carry within it.
+//' @return integer
+//' @keywords internal
+//' @export
+// [[Rcpp::export(.linCmtCarryMaxPairs)]]
+IntegerVector linCmtCarryMaxPairs() {
+  return IntegerVector::create(lcCarryInSolve() ? INT_MAX : RX_LINCMT_CARRY_MAXPAIRS);
+}
+
 //' Read (and optionally reset) the linCmt() carry-advance fast-path counters
 //'
 //' @param reset logical; when TRUE zero the counters after reading
@@ -1883,6 +1900,8 @@ NumericVector linCmtCarryFastStats(bool reset = false) {
 // p2 argument slot of linCmtB (per that sentinel's contract), so addVal[i]
 // is passed THERE and theta(i,2) is ignored for those rows (no theta is
 // read by -7 anyway).
+static inline int lcCarryNpair(rx_solving_options *op, int m);
+
 //' Drive linCmtB() carry sentinels on a solved subject (test hook)
 //'
 //' Replays linCmtB() calls for one subject of the most recent rxode2 solve
@@ -1921,14 +1940,21 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
     Rcpp::stop("theta must be length(t) x 7 (p1, v1, p2, p3, p4, p5, ka)");
   }
   int m = ncmt + oral0;
+  int npair = m > 0 ? lcCarryNpair(RXS(rx, op), m) : 0;
+  // in ind->solve, the -5 at call i works on record row i
+  int nRow = lcCarryInSolve() ? IND(ind, n_all_times) : INT_MAX;
   NumericVector out(n);
   NumericVector av = addVal.isNull() ? NumericVector(n, 0.0) : NumericVector(addVal);
   for (int i = 0; i < n; i++) {
-    if (which1[i] == -5 || which1[i] == -6 || which1[i] == -7) {
+    // an impossible shape (m <= 0) is left to linCmtB(), which gives NA
+    if (m > 0 && (which1[i] == -5 || which1[i] == -6 || which1[i] == -7)) {
       int pair = which2[i] / m;
-      if (pair < 0 || pair >= RX_LINCMT_CARRY_MAXPAIRS) {
-        Rcpp::stop("carry pair index %d out of range (which2=%d, m=%d): at most RX_LINCMT_CARRY_MAXPAIRS=%d simultaneous carry-eligible (linCmt parameter, eta) pairs are supported",
-                   pair, which2[i], m, RX_LINCMT_CARRY_MAXPAIRS);
+      if (pair < 0 || pair >= npair) {
+        Rcpp::stop("carry pair index %d out of range (which2=%d, m=%d): the solved model's carry holds %d pairs",
+                   pair, which2[i], m, npair);
+      }
+      if (i >= nRow) {
+        Rcpp::stop("carry call %d past the solved subject's %d records", i + 1, nRow);
       }
     }
     IND(ind, idx) = i;
@@ -1955,7 +1981,7 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
 
 // Compartment count m = ncmt + oral0 for the carry sentinels, or 0 when the
 // shape is not one linCmt() can produce.  A hand-written linCmtB() call can
-// pass any ncmt/oral0, and ind->linCmtCarryT only has 4 rows, so every
+// pass any ncmt/oral0, and the carry has at most 4 rows, so every
 // sentinel that indexes by row must refuse anything else.
 static inline int linCmtCarryM(int ncmt, int oral0) {
   if (ncmt < 1 || ncmt > 3 || oral0 < 0 || oral0 > 1) return 0;
@@ -2768,18 +2794,112 @@ static inline double linCmtBtransition(linB_t &lcb, rx_solve *rx,
   return colOut[row];
 }
 
+// The carry, d(Alast)/d(eta) for each carried (linCmt parameter, eta)
+// pair: element (row r, pair p) is x[r*rs + p*ps].  An rxode2 that sends
+// op->numLinCarry keeps it in ind->solve, the last numLinCarry states of
+// each record's row (state r + m*p); the carry in use is the row of the
+// record last advanced (ind->linCmtCarryRow, -1 before any, -2 once a -5
+// found no row, after which the subject's carry is NA).  An older
+// rxode2 has only the fixed ind->linCmtCarryT, 4 rows by
+// RX_LINCMT_CARRY_MAXPAIRS pairs.
+struct lcCarryV {
+  double *x;
+  int rs, ps, npair;
+  double &at(int r, int p) const { return x[(ptrdiff_t)r*rs + (ptrdiff_t)p*ps]; }
+};
+
+static inline bool lcCarryInSolve(void) {
+  return LC_HAS(op, numLinCarry) && LC_HAS(ind, linCmtCarryRow) &&
+    LC_HAS(ind, n_all_times);
+}
+
+// Pairs the carry holds for m = ncmt + oral0
+static inline int lcCarryNpair(rx_solving_options *op, int m) {
+  return lcCarryInSolve() ? OPT(op, numLinCarry)/m : RX_LINCMT_CARRY_MAXPAIRS;
+}
+
+// Record row k's carry in ind->solve, or NULL when there is none
+static inline double *lcCarrySolveRow(rx_solving_options_ind *ind,
+                                      rx_solving_options *op, int k) {
+  int n = OPT(op, numLinCarry);
+  int neq = rxEffNeq(ind, op);
+  int off = OPT(op, neq) - n;
+  if (n <= 0 || k < 0 || k >= IND(ind, n_all_times) || off < 0 || off + n > neq ||
+      IND(ind, solve) == NULL) {
+    return NULL;
+  }
+  return IND(ind, solve) + (ptrdiff_t)neq*k + off;
+}
+
+static inline lcCarryV lcCarryView(rx_solving_options_ind *ind, rx_solving_options *op,
+                                   int m, int k) {
+  if (!lcCarryInSolve()) {
+    lcCarryV v = {IND(ind, linCmtCarryT), RX_LINCMT_CARRY_MAXPAIRS, 1,
+                  RX_LINCMT_CARRY_MAXPAIRS};
+    return v;
+  }
+  lcCarryV v = {lcCarrySolveRow(ind, op, k), 1, m, 0};
+  if (v.x != NULL) v.npair = OPT(op, numLinCarry)/m;
+  return v;
+}
+
+// The carry in use.  In ind->solve, a carry not yet started begins, zeroed,
+// at record row idx (Alast starts at 0).
+static inline lcCarryV lcCarryCur(rx_solving_options_ind *ind, rx_solving_options *op,
+                                  int m, int idx) {
+  if (!lcCarryInSolve()) return lcCarryView(ind, op, m, 0);
+  int k = IND(ind, linCmtCarryRow);
+  if (k >= 0) return lcCarryView(ind, op, m, k);
+  if (k < -1) return lcCarryView(ind, op, m, -1);
+  lcCarryV v = lcCarryView(ind, op, m, idx);
+  if (v.x != NULL) {
+    memset(v.x, 0, (size_t)OPT(op, numLinCarry)*sizeof(double));
+    IND(ind, linCmtCarryRow) = idx;
+  }
+  return v;
+}
+
+// The carry the -5 advance at record row idx works on in place.  In
+// ind->solve that is row idx, first set to the row last advanced (zero
+// before any); the fixed array is advanced where it is.  A row with no
+// carry marks the subject's carry broken (-2), so the -7/-6 after it give
+// NA instead of using the row before.
+static inline lcCarryV lcCarryToRow(rx_solving_options_ind *ind, rx_solving_options *op,
+                                    int m, int idx) {
+  if (!lcCarryInSolve()) return lcCarryView(ind, op, m, 0);
+  int k = IND(ind, linCmtCarryRow);
+  lcCarryV v = lcCarryView(ind, op, m, k < -1 ? -1 : idx);
+  if (v.x == NULL) {
+    IND(ind, linCmtCarryRow) = -2;
+    return v;
+  }
+  size_t nb = (size_t)OPT(op, numLinCarry)*sizeof(double);
+  if (k != idx) {
+    double *src = (k >= 0) ? lcCarrySolveRow(ind, op, k) : NULL;
+    if (src == NULL) {
+      memset(v.x, 0, nb);
+    } else {
+      memcpy(v.x, src, nb);
+    }
+    IND(ind, linCmtCarryRow) = idx;
+  }
+  return v;
+}
+
 // which1 == -7: add a caller-supplied local contribution (dPredDTheta_i *
 // dThetaDEta_i, riding in the otherwise unused p2) to the stored cumulative
 // carry at (row, pair), which2 = row + m*pair, on top of what -5 carried.
-static inline double linCmtBcarryAdd(rx_solving_options_ind *ind, int ncmt, int oral0,
-                                     int which2, double p2) {
+static inline double linCmtBcarryAdd(rx_solving_options_ind *ind, rx_solving_options *op,
+                                     int idx, int ncmt, int oral0, int which2, double p2) {
   int m = linCmtCarryM(ncmt, oral0);
-  if (m == 0) return NA_REAL;
+  if (m == 0 || which2 < 0) return NA_REAL;
   int row = which2 % m;
   int pair = which2 / m;
-  if (which2 < 0 || pair >= RX_LINCMT_CARRY_MAXPAIRS) return NA_REAL;
-  IND(ind, linCmtCarryT)[row*RX_LINCMT_CARRY_MAXPAIRS + pair] += p2;
-  return IND(ind, linCmtCarryT)[row*RX_LINCMT_CARRY_MAXPAIRS + pair];
+  if (pair >= lcCarryNpair(op, m)) return NA_REAL;
+  lcCarryV v = lcCarryCur(ind, op, m, idx);
+  if (v.x == NULL) return NA_REAL;
+  v.at(row, pair) += p2;
+  return v.at(row, pair);
 }
 
 // Runtime per-subject fast path for the -5 advance (phase 3b.4): while this
@@ -2831,7 +2951,8 @@ static inline bool linCmtBcarryFast(rx_solving_options_ind *ind, const double *t
 // multiply leaves the row and the fast path as they are, which is what the
 // carry did with every replace and multiply before it handled them.
 static inline void linCmtBcarryEvent(rx_solving_options_ind *ind,
-                                     rx_solving_options *op, int idx, int m) {
+                                     rx_solving_options *op, int idx, int m,
+                                     const lcCarryV &v) {
   if (idx <= 0) return;
   int kPrev = IND(ind, ix)[idx - 1];
   int wh, cmt, wh100, whI, wh0;
@@ -2841,9 +2962,9 @@ static inline void linCmtBcarryEvent(rx_solving_options_ind *ind,
   if (c < 0 || c >= m) return;
   if (whI == EVIDF_MULT && (OPT(op, linCmtOriginMask) & (1 << c))) return;
   double k = (whI == EVIDF_MULT) ? getDose(ind, kPrev) : 0.0;
-  for (int p = 0; p < RX_LINCMT_CARRY_MAXPAIRS; ++p) {
-    double &v = IND(ind, linCmtCarryT)[c*RX_LINCMT_CARRY_MAXPAIRS + p];
-    v = (whI == EVIDF_REPLACE) ? 0.0 : k*v;
+  for (int p = 0; p < v.npair; ++p) {
+    double &x = v.at(c, p);
+    x = (whI == EVIDF_REPLACE) ? 0.0 : k*x;
   }
   IND(ind, linCmtCarryVarying) = 2;
 }
@@ -2857,42 +2978,39 @@ static inline void linCmtBcarryEvent(rx_solving_options_ind *ind,
 // previous record's replace or multiply applies, and the constant-theta
 // fast path may skip the advance.  Returns true when the row takes no M.
 static inline bool linCmtBcarryPre(rx_solving_options_ind *ind, rx_solving_options *op,
-                                   int idx, int m, const double *thNow, double _t) {
+                                   int idx, int m, const lcCarryV &v,
+                                   const double *thNow, double _t) {
   // mode 3: linCmtCarryLiveTest()'s hand drive, whose idx is no record
   bool records = IND(ind, linCmtCarryVarying) != 3;
 #pragma omp atomic
   linCmtCarryAdvCallsN++;
   if (records && idx >= 0 && getEvid(ind, IND(ind, ix)[idx]) == 3) {
-    for (int k = 0; k < 4*RX_LINCMT_CARRY_MAXPAIRS; ++k) {
-      IND(ind, linCmtCarryT)[k] = 0.0;
+    for (int p = 0; p < v.npair; ++p) {
+      for (int r = 0; r < m; ++r) v.at(r, p) = 0.0;
     }
     IND(ind, linCmtCarryTlast) = NAN;
     return true;
   }
-  if (records) linCmtBcarryEvent(ind, op, idx, m);
+  if (records) linCmtBcarryEvent(ind, op, idx, m, v);
   return linCmtBcarryFast(ind, thNow, _t);
 }
 
-// s_new = M * s_old for every pair column (top m rows; the untouched rows
-// stay 0 from iniSubject()'s reset).  localM is 4x4 row-major.
-static inline void linCmtBcarryApplyM(rx_solving_options_ind *ind, const double *localM,
-                                      int m) {
-  double tNew[4*RX_LINCMT_CARRY_MAXPAIRS];
-  for (int r = 0; r < m; r++) {
-    for (int c = 0; c < RX_LINCMT_CARRY_MAXPAIRS; c++) {
+// s_new = M * s_old for every pair column (top m rows).  localM is 4x4
+// row-major.  No FMA contraction: clang (e.g. macOS arm64) may otherwise
+// fuse one specialized copy of the loop and not another, so the solve-buffer
+// and fixed-array carries would differ in the last bits.
+static inline void linCmtBcarryApplyM(const lcCarryV &v, const double *localM, int m) {
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
+  for (int c = 0; c < v.npair; c++) {
+    double sNew[4];
+    for (int r = 0; r < m; r++) {
       double s = 0.0;
-      for (int k2 = 0; k2 < m; k2++) {
-        s += localM[r*4 + k2] *
-          IND(ind, linCmtCarryT)[k2*RX_LINCMT_CARRY_MAXPAIRS + c];
-      }
-      tNew[r*RX_LINCMT_CARRY_MAXPAIRS + c] = s;
+      for (int k2 = 0; k2 < m; k2++) s += localM[r*4 + k2] * v.at(k2, c);
+      sNew[r] = s;
     }
-  }
-  for (int r = 0; r < m; r++) {
-    for (int c = 0; c < RX_LINCMT_CARRY_MAXPAIRS; c++) {
-      IND(ind, linCmtCarryT)[r*RX_LINCMT_CARRY_MAXPAIRS + c] =
-        tNew[r*RX_LINCMT_CARRY_MAXPAIRS + c];
-    }
+    for (int r = 0; r < m; r++) v.at(r, c) = sNew[r];
   }
 }
 
@@ -2903,8 +3021,11 @@ static inline void linCmtBcarryApplyM(rx_solving_options_ind *ind, const double 
 // order (ix the identity): evid as rxode2 stores it (encoded), dose, theta
 // (n x 7, what the fast path compares), M (m x m x n, row i's transition
 // matrix), add (n x m x npair, row i's -7 adds), then op's linCmtOriginMask
-// and linOffset, and the fast-path switch.  Returns the carry (n x m x
-// npair) after each row's adds.
+// and linOffset, the fast-path switch, and whether the carry is kept in a
+// solve buffer (as rxode2 sending op->numLinCarry does) or in the fixed
+// array; for the solve buffer, the states before the carry in each row
+// (pad) and the buffer's rows (nAll; rows past it have no carry).  Returns
+// the carry (n x m x npair) after each row's adds, NA where there is none.
 struct lcCarryProbeInd {
   lcT_indix ix;
   lcT_indevid evid;
@@ -2915,15 +3036,21 @@ struct lcCarryProbeInd {
   lcT_indlinCmtCarryTlast linCmtCarryTlast;
   lcT_indlinCmtCarryPrevTheta linCmtCarryPrevTheta;
   lcT_indlinCmtCarryVarying linCmtCarryVarying;
+  lcT_indsolve solve;
+  lcT_indneqOverride neqOverride;
+  lcT_indn_all_times n_all_times;
+  lcT_indlinCmtCarryRow linCmtCarryRow;
 };
 struct lcCarryProbeOp {
   lcT_oplinOffset linOffset;
   lcT_oplinCmtOriginMask linCmtOriginMask;
+  lcT_opneq neq;
+  lcT_opnumLinCarry numLinCarry;
 };
 
 // The probe's input checks; returns the pair count.
 static int lcCarryProbeNpair(SEXP evidS, SEXP doseS, SEXP thetaS, SEXP MS,
-                             SEXP addS, int n, int m) {
+                             SEXP addS, int n, int m, int inSolve) {
   if (n < 1 || m == 0 || TYPEOF(evidS) != INTSXP || TYPEOF(doseS) != REALSXP ||
       TYPEOF(thetaS) != REALSXP || TYPEOF(MS) != REALSXP || TYPEOF(addS) != REALSXP ||
       Rf_length(doseS) != n || Rf_length(thetaS) != 7*n || Rf_length(MS) != m*m*n ||
@@ -2931,14 +3058,15 @@ static int lcCarryProbeNpair(SEXP evidS, SEXP doseS, SEXP thetaS, SEXP MS,
     Rf_error("carryEventProbe: inconsistent inputs");
   }
   int npair = Rf_length(addS) / (n*m);
-  if (npair < 1 || npair > RX_LINCMT_CARRY_MAXPAIRS) {
+  if (npair < 1 || (!inSolve && npair > RX_LINCMT_CARRY_MAXPAIRS)) {
     Rf_error("carryEventProbe: 1 to %d pairs", RX_LINCMT_CARRY_MAXPAIRS);
   }
   return npair;
 }
 
-// Points the offsets the carry reads at the probe's structs.
-static void lcCarryProbeSetOff(void) {
+// Points the offsets the carry reads at the probe's structs; without
+// inSolve the solve-buffer rows read as absent, as from an older rxode2.
+static void lcCarryProbeSetOff(int inSolve) {
   _lcOff[lcOff_indix] = offsetof(lcCarryProbeInd, ix);
   _lcOff[lcOff_indevid] = offsetof(lcCarryProbeInd, evid);
   _lcOff[lcOff_indextraDoseEvid] = offsetof(lcCarryProbeInd, extraDoseEvid);
@@ -2950,6 +3078,12 @@ static void lcCarryProbeSetOff(void) {
   _lcOff[lcOff_indlinCmtCarryVarying] = offsetof(lcCarryProbeInd, linCmtCarryVarying);
   _lcOff[lcOff_oplinOffset] = offsetof(lcCarryProbeOp, linOffset);
   _lcOff[lcOff_oplinCmtOriginMask] = offsetof(lcCarryProbeOp, linCmtOriginMask);
+  _lcOff[lcOff_indsolve] = offsetof(lcCarryProbeInd, solve);
+  _lcOff[lcOff_indneqOverride] = offsetof(lcCarryProbeInd, neqOverride);
+  _lcOff[lcOff_opneq] = offsetof(lcCarryProbeOp, neq);
+  _lcOff[lcOff_indn_all_times] = inSolve ? offsetof(lcCarryProbeInd, n_all_times) : -1;
+  _lcOff[lcOff_indlinCmtCarryRow] = inSolve ? offsetof(lcCarryProbeInd, linCmtCarryRow) : -1;
+  _lcOff[lcOff_opnumLinCarry] = inSolve ? offsetof(lcCarryProbeOp, numLinCarry) : -1;
 }
 
 // One probe row: the -5 advance, the -7 adds, then the carry into out.
@@ -2961,21 +3095,24 @@ static void lcCarryProbeRow(lcCarryProbeInd *pind, lcCarryProbeOp *pop, int i,
   rx_solving_options *op = (rx_solving_options*)pop;
   double th[7];
   for (int j = 0; j < 7; ++j) th[j] = theta[i + n*j];
-  if (!linCmtBcarryPre(ind, op, i, m, th, (double)i)) {
+  lcCarryV v = lcCarryToRow(ind, op, m, i);
+  // as linCmtBcarryAdvance(): a row with no carry is not advanced
+  if (v.x != NULL && !linCmtBcarryPre(ind, op, i, m, v, th, (double)i)) {
     double localM[16];
     for (int r = 0; r < m; ++r) {
       for (int c = 0; c < m; ++c) localM[r*4 + c] = M[r + m*c + m*m*i];
     }
-    linCmtBcarryApplyM(ind, localM, m);
+    linCmtBcarryApplyM(v, localM, m);
   }
   for (int p = 0; p < npair; ++p) {
     for (int r = 0; r < m; ++r) {
-      linCmtBcarryAdd(ind, ncmt, oral0, r + m*p, add[i + n*r + n*m*p]);
+      linCmtBcarryAdd(ind, op, i, ncmt, oral0, r + m*p, add[i + n*r + n*m*p]);
     }
   }
+  lcCarryV cur = lcCarryCur(ind, op, m, i);
   for (int p = 0; p < npair; ++p) {
     for (int r = 0; r < m; ++r) {
-      out[i + n*r + n*m*p] = pind->linCmtCarryT[r*RX_LINCMT_CARRY_MAXPAIRS + p];
+      out[i + n*r + n*m*p] = cur.x == NULL ? NA_REAL : cur.at(r, p);
     }
   }
 }
@@ -2983,11 +3120,13 @@ static void lcCarryProbeRow(lcCarryProbeInd *pind, lcCarryProbeOp *pop, int i,
 extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP thetaS,
                                               SEXP MS, SEXP addS, SEXP ncmtS,
                                               SEXP oral0S, SEXP maskS,
-                                              SEXP linOffsetS, SEXP fastS) {
+                                              SEXP linOffsetS, SEXP fastS,
+                                              SEXP inSolveS, SEXP padS, SEXP nAllS) {
   int n = Rf_length(evidS);
   int ncmt = Rf_asInteger(ncmtS), oral0 = Rf_asInteger(oral0S);
   int m = linCmtCarryM(ncmt, oral0);
-  int npair = lcCarryProbeNpair(evidS, doseS, thetaS, MS, addS, n, m);
+  int inSolve = Rf_asLogical(inSolveS) == TRUE;
+  int npair = lcCarryProbeNpair(evidS, doseS, thetaS, MS, addS, n, m, inSolve);
   SEXP ret = PROTECT(Rf_allocVector(REALSXP, n*m*npair));
   double *out = REAL(ret);
   const double *theta = REAL(thetaS), *M = REAL(MS), *add = REAL(addS);
@@ -2999,14 +3138,31 @@ extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP theta
   pind.evid = INTEGER(evidS);
   pind.dose = REAL(doseS);
   pind.linCmtCarryTlast = NAN;
+  // in the solve buffer, each of nAll rows holds pad other states, then the
+  // carry; the other states are set to -1 and must stay so
+  int pad = Rf_asInteger(padS), nAll = Rf_asInteger(nAllS);
+  if (pad < 0 || pad == NA_INTEGER || nAll < 0 || nAll == NA_INTEGER) {
+    Rf_error("carryEventProbe: inconsistent inputs");
+  }
+  int neq = pad + m*npair;
+  std::vector<double> solve((size_t)nAll*neq, 0.0);
+  for (int i = 0; i < nAll; ++i) {
+    for (int j = 0; j < pad; ++j) solve[(size_t)i*neq + j] = -1.0;
+  }
+  pind.solve = nAll > 0 ? solve.data() : NULL;
+  pind.neqOverride = -1;
+  pind.n_all_times = nAll;
+  pind.linCmtCarryRow = -1;
   lcCarryProbeOp pop;
   pop.linOffset = Rf_asInteger(linOffsetS);
   pop.linCmtOriginMask = Rf_asInteger(maskS);
+  pop.neq = neq;
+  pop.numLinCarry = m*npair;
   int fast = Rf_asLogical(fastS) == TRUE;
   // nothing below calls back into R until the offsets are restored
   ptrdiff_t saved[lcOffN];
   memcpy(saved, _lcOff, sizeof(saved));
-  lcCarryProbeSetOff();
+  lcCarryProbeSetOff(inSolve);
   int fastPrev = linCmtCarryFastEnabled;
   linCmtCarryFastEnabled = fast;
   for (int i = 0; i < n; ++i) {
@@ -3014,17 +3170,24 @@ extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP theta
   }
   linCmtCarryFastEnabled = fastPrev;
   memcpy(_lcOff, saved, sizeof(saved));
+  for (int i = 0; i < nAll; ++i) {
+    for (int j = 0; j < pad; ++j) {
+      if (solve[(size_t)i*neq + j] != -1.0) {
+        UNPROTECT(1);
+        Rf_error("carryEventProbe: a non-carry state was written");
+      }
+    }
+  }
   UNPROTECT(1);
   return ret;
 }
 
-// which1 == -6 (read) / -5 (advance) of the cumulative carry
-// ind->linCmtCarryT (4 rows x RX_LINCMT_CARRY_MAXPAIRS columns, row-major;
-// each column is one carry-eligible (linCmt-parameter, eta) pair's own
+// which1 == -6 (read) / -5 (advance) of the cumulative carry (lcCarryV;
+// each pair column is that (linCmt-parameter, eta) pair's own
 // d(Alast)/d(eta) m-vector evolving as s_i = M_i*s_{i-1} + (-7 adds)).
 // which2 = row + m*pair is the encoding the carry codegen emits; a pair
-// index past the cap returns NA (no OOB write) -- the model-build layer
-// enforces the cap.  -6 returns the stored value with no recomputation.
+// index past the carry's columns returns NA (no OOB write).  -6 returns the
+// stored value with no recomputation.
 // -5 applies THIS interval's local transition matrix M_i (which depends
 // only on the row's own theta, so one advance serves every pair) to every
 // column at once; it must be called EXACTLY ONCE PER ROW per subject.  Each
@@ -3037,14 +3200,18 @@ static inline double linCmtBcarryAdvance(linB_t &lcb, rx_solve *rx,
                                          double p1, double v1, double p2, double p3,
                                          double p4, double p5, double ka) {
   int m = linCmtCarryM(ncmt, oral0);
-  if (m == 0) return NA_REAL;
+  if (m == 0 || which2 < 0) return NA_REAL;
   int row = which2 % m;
   int pair = which2 / m;
-  if (which2 < 0 || pair >= RX_LINCMT_CARRY_MAXPAIRS) return NA_REAL;
-  int slot = row*RX_LINCMT_CARRY_MAXPAIRS + pair;
-  if (which1 == -6) return IND(ind, linCmtCarryT)[slot];
+  if (pair >= lcCarryNpair(op, m)) return NA_REAL;
+  if (which1 == -6) {
+    lcCarryV cur = lcCarryCur(ind, op, m, idx);
+    return cur.x == NULL ? NA_REAL : cur.at(row, pair);
+  }
+  lcCarryV v = lcCarryToRow(ind, op, m, idx);
+  if (v.x == NULL) return NA_REAL;
   double thNow[7] = {p1, v1, p2, p3, p4, p5, ka};
-  if (linCmtBcarryPre(ind, op, idx, m, thNow, _t)) return IND(ind, linCmtCarryT)[slot];
+  if (linCmtBcarryPre(ind, op, idx, m, v, thNow, _t)) return v.at(row, pair);
   // may be the first touch of lc on this thread (a standalone re-query)
   if (!lcb.lc.isSame(ncmt, oral0, trans, RXS(rx, ndiff))) {
     linCmtBsetModel(lcb, linCmtBindGet(ind), ncmt, oral0, trans, IND(ind, linSS), rx);
@@ -3068,8 +3235,8 @@ static inline double linCmtBcarryAdvance(linB_t &lcb, rx_solve *rx,
     linCmtBtransitionColumn(lcb.lc, gF, kaV, ncmt, m, c, colOut);
     for (int r = 0; r < m; r++) localM[r*4 + c] = colOut[r];
   }
-  linCmtBcarryApplyM(ind, localM, m);
-  return IND(ind, linCmtCarryT)[slot];
+  linCmtBcarryApplyM(v, localM, m);
+  return v.at(row, pair);
 }
 
 // Reads of the row's stored Jacobian/amounts/concentration gradient.
@@ -3145,7 +3312,7 @@ static inline bool linCmtBquery(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
     *out = linCmtBoriginQuery(lcb, ind, op, idx, ncmt, oral0, which1, which2,
                               trans, p1, v1, p2, p3, p4, p5, ka);
   } else if (which1 == -7) {
-    *out = linCmtBcarryAdd(ind, ncmt, oral0, which2, p2);
+    *out = linCmtBcarryAdd(ind, op, idx, ncmt, oral0, which2, p2);
   } else if (which1 == -8) {
     // Pin this subject's pass to the full -5 advance: a caller feeding -7
     // a contribution that does not telescope (an event jump) must not have

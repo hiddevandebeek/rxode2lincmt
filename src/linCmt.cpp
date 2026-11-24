@@ -3624,11 +3624,15 @@ static inline int linCmtSecondOrderUnsupported(rx_solving_options_ind *ind,
                                                int ssCounts) {
   int dosed = 0, ssInf = 0, rm = 0;
   linCmtDoseScan(ind, op, &dosed, &ssInf, NULL, &rm);
-  if (rm || (ssCounts && ssInf)) return 1;
+  // The eta-space carry (ssCounts) applies replace and multiply records
+  // itself (linCmtBetaSentinel); an added steady state (ss = 2) it does not.
+  if (rm && !ssCounts) return 1;
+  if (ssCounts && ssInf) return 1;
   if (OPT(op, linCmtLagMask) != 0) return 1;
   for (int i = 0; i < IND(ind, ndoses); ++i) {
     int wh, cmt, wh100, whI, wh0;
     getWh(getEvid(ind, IND(ind, idose)[i]), &wh, &cmt, &wh100, &whI, &wh0);
+    if (ssCounts && (wh0 == EVID0_SS2 || wh0 == EVID0_SS20)) return 1;
     if (whI == EVIDF_MODEL_DUR_ON || whI == EVIDF_MODEL_DUR_OFF ||
         whI == EVIDF_MODEL_RATE_ON || whI == EVIDF_MODEL_RATE_OFF) {
       return 1;
@@ -4217,6 +4221,9 @@ static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
     std::fill(wsp.etaS2.begin(), wsp.etaS2.end(), 0.0);
     wsp.etaTlast = NAN;
     wsp.etaHavePrev = 0;
+    // a new pass re-detects, in order, every record the carry cannot follow;
+    // only what the subject-level scan refused stays refused
+    wsp.etaValid = wsp.etaScan ? 0 : 1;
   }
   double dt = ISNAN(wsp.etaTlast) ? 0.0 : (_t - wsp.etaTlast);
   int from = (wsp.etaPrevIdx >= 0 && !restart) ? wsp.etaPrevIdx : idx;
@@ -4283,6 +4290,30 @@ static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
           wsp.etaS1[c*E + a] += amt*wsp.etaF1[c*E + a];
           for (int b = 0; b < nE; b++) {
             wsp.etaS2[(c*E + a)*E + b] += amt*wsp.etaF2[(c*E + a)*E + b];
+          }
+        }
+      } else if (whI == EVIDF_REPLACE) {
+        // the compartment is set to F*amt: its eta derivatives are amt times
+        // F's (zero without a modeled F), whatever came before
+        double amt = getDose(ind, IND(ind, ix)[idx]);
+        for (int a = 0; a < nE; a++) {
+          wsp.etaS1[c*E + a] = amt*wsp.etaF1[c*E + a];
+          for (int b = 0; b < nE; b++) {
+            wsp.etaS2[(c*E + a)*E + b] = amt*wsp.etaF2[(c*E + a)*E + b];
+          }
+        }
+      } else if (whI == EVIDF_MULT) {
+        // the compartment is scaled by its factor; with a modeled F the
+        // factor is F*amt, whose value the carry does not have
+        bool anyF = (OPT(op, linCmtOriginMask) & (1 << c)) != 0;
+        for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
+        if (anyF) {
+          wsp.etaValid = 0;
+        } else {
+          double k = getDose(ind, IND(ind, ix)[idx]);
+          for (int a = 0; a < nE; a++) {
+            wsp.etaS1[c*E + a] *= k;
+            for (int b = 0; b < nE; b++) wsp.etaS2[(c*E + a)*E + b] *= k;
           }
         }
       } else {

@@ -1941,6 +1941,8 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
   }
   int m = ncmt + oral0;
   int npair = m > 0 ? lcCarryNpair(RXS(rx, op), m) : 0;
+  // in ind->solve, the -5 at call i works on record row i
+  int nRow = lcCarryInSolve() ? IND(ind, n_all_times) : INT_MAX;
   NumericVector out(n);
   NumericVector av = addVal.isNull() ? NumericVector(n, 0.0) : NumericVector(addVal);
   for (int i = 0; i < n; i++) {
@@ -1949,6 +1951,9 @@ NumericVector linCmtCarryLiveTest(int id, NumericVector t, NumericVector tPrior,
       if (pair < 0 || pair >= npair) {
         Rcpp::stop("carry pair index %d out of range (which2=%d, m=%d): the solved model's carry holds %d pairs",
                    pair, which2[i], m, npair);
+      }
+      if (i >= nRow) {
+        Rcpp::stop("carry call %d past the solved subject's %d records", i + 1, nRow);
       }
     }
     IND(ind, idx) = i;
@@ -2792,7 +2797,8 @@ static inline double linCmtBtransition(linB_t &lcb, rx_solve *rx,
 // pair: element (row r, pair p) is x[r*rs + p*ps].  An rxode2 that sends
 // op->numLinCarry keeps it in ind->solve, the last numLinCarry states of
 // each record's row (state r + m*p); the carry in use is the row of the
-// record last advanced (ind->linCmtCarryRow, -1 before any).  An older
+// record last advanced (ind->linCmtCarryRow, -1 before any, -2 once a -5
+// found no row, after which the subject's carry is NA).  An older
 // rxode2 has only the fixed ind->linCmtCarryT, 4 rows by
 // RX_LINCMT_CARRY_MAXPAIRS pairs.
 struct lcCarryV {
@@ -2843,6 +2849,7 @@ static inline lcCarryV lcCarryCur(rx_solving_options_ind *ind, rx_solving_option
   if (!lcCarryInSolve()) return lcCarryView(ind, op, m, 0);
   int k = IND(ind, linCmtCarryRow);
   if (k >= 0) return lcCarryView(ind, op, m, k);
+  if (k < -1) return lcCarryView(ind, op, m, -1);
   lcCarryV v = lcCarryView(ind, op, m, idx);
   if (v.x != NULL) {
     memset(v.x, 0, (size_t)OPT(op, numLinCarry)*sizeof(double));
@@ -2853,13 +2860,18 @@ static inline lcCarryV lcCarryCur(rx_solving_options_ind *ind, rx_solving_option
 
 // The carry the -5 advance at record row idx works on in place.  In
 // ind->solve that is row idx, first set to the row last advanced (zero
-// before any); the fixed array is advanced where it is.
+// before any); the fixed array is advanced where it is.  A row with no
+// carry marks the subject's carry broken (-2), so the -7/-6 after it give
+// NA instead of using the row before.
 static inline lcCarryV lcCarryToRow(rx_solving_options_ind *ind, rx_solving_options *op,
                                     int m, int idx) {
   if (!lcCarryInSolve()) return lcCarryView(ind, op, m, 0);
-  lcCarryV v = lcCarryView(ind, op, m, idx);
-  if (v.x == NULL) return v;
   int k = IND(ind, linCmtCarryRow);
+  lcCarryV v = lcCarryView(ind, op, m, k < -1 ? -1 : idx);
+  if (v.x == NULL) {
+    IND(ind, linCmtCarryRow) = -2;
+    return v;
+  }
   size_t nb = (size_t)OPT(op, numLinCarry)*sizeof(double);
   if (k != idx) {
     double *src = (k >= 0) ? lcCarrySolveRow(ind, op, k) : NULL;
@@ -3005,7 +3017,9 @@ static inline void linCmtBcarryApplyM(const lcCarryV &v, const double *localM, i
 // matrix), add (n x m x npair, row i's -7 adds), then op's linCmtOriginMask
 // and linOffset, the fast-path switch, and whether the carry is kept in a
 // solve buffer (as rxode2 sending op->numLinCarry does) or in the fixed
-// array.  Returns the carry (n x m x npair) after each row's adds.
+// array; for the solve buffer, the states before the carry in each row
+// (pad) and the buffer's rows (nAll; rows past it have no carry).  Returns
+// the carry (n x m x npair) after each row's adds, NA where there is none.
 struct lcCarryProbeInd {
   lcT_indix ix;
   lcT_indevid evid;
@@ -3091,7 +3105,7 @@ static void lcCarryProbeRow(lcCarryProbeInd *pind, lcCarryProbeOp *pop, int i,
   lcCarryV cur = lcCarryCur(ind, op, m, i);
   for (int p = 0; p < npair; ++p) {
     for (int r = 0; r < m; ++r) {
-      out[i + n*r + n*m*p] = cur.at(r, p);
+      out[i + n*r + n*m*p] = cur.x == NULL ? NA_REAL : cur.at(r, p);
     }
   }
 }
@@ -3100,7 +3114,7 @@ extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP theta
                                               SEXP MS, SEXP addS, SEXP ncmtS,
                                               SEXP oral0S, SEXP maskS,
                                               SEXP linOffsetS, SEXP fastS,
-                                              SEXP inSolveS) {
+                                              SEXP inSolveS, SEXP padS, SEXP nAllS) {
   int n = Rf_length(evidS);
   int ncmt = Rf_asInteger(ncmtS), oral0 = Rf_asInteger(oral0S);
   int m = linCmtCarryM(ncmt, oral0);
@@ -3117,16 +3131,25 @@ extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP theta
   pind.evid = INTEGER(evidS);
   pind.dose = REAL(doseS);
   pind.linCmtCarryTlast = NAN;
-  // in the solve buffer, each row holds only the carry
-  std::vector<double> solve((size_t)n*m*npair, 0.0);
-  pind.solve = solve.data();
+  // in the solve buffer, each of nAll rows holds pad other states, then the
+  // carry; the other states are set to -1 and must stay so
+  int pad = Rf_asInteger(padS), nAll = Rf_asInteger(nAllS);
+  if (pad < 0 || pad == NA_INTEGER || nAll < 0 || nAll == NA_INTEGER) {
+    Rf_error("carryEventProbe: inconsistent inputs");
+  }
+  int neq = pad + m*npair;
+  std::vector<double> solve((size_t)nAll*neq, 0.0);
+  for (int i = 0; i < nAll; ++i) {
+    for (int j = 0; j < pad; ++j) solve[(size_t)i*neq + j] = -1.0;
+  }
+  pind.solve = nAll > 0 ? solve.data() : NULL;
   pind.neqOverride = -1;
-  pind.n_all_times = n;
+  pind.n_all_times = nAll;
   pind.linCmtCarryRow = -1;
   lcCarryProbeOp pop;
   pop.linOffset = Rf_asInteger(linOffsetS);
   pop.linCmtOriginMask = Rf_asInteger(maskS);
-  pop.neq = m*npair;
+  pop.neq = neq;
   pop.numLinCarry = m*npair;
   int fast = Rf_asLogical(fastS) == TRUE;
   // nothing below calls back into R until the offsets are restored
@@ -3140,6 +3163,14 @@ extern "C" SEXP _rxode2lincmt_carryEventProbe(SEXP evidS, SEXP doseS, SEXP theta
   }
   linCmtCarryFastEnabled = fastPrev;
   memcpy(_lcOff, saved, sizeof(saved));
+  for (int i = 0; i < nAll; ++i) {
+    for (int j = 0; j < pad; ++j) {
+      if (solve[(size_t)i*neq + j] != -1.0) {
+        UNPROTECT(1);
+        Rf_error("carryEventProbe: a non-carry state was written");
+      }
+    }
+  }
   UNPROTECT(1);
   return ret;
 }

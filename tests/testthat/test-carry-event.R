@@ -256,3 +256,31 @@ test_that("the carry in a solve buffer is not capped at 8 pairs", {
     "1 to 8 pairs"
   )
 })
+
+test_that("the carry in a solve buffer sits after the other states", {
+  set.seed(47)
+  .cs <- .carryCase(.carryEv(.carryEvid(4L, 1L), 0), 3L, 3L, thetaStep = 3L)
+  .a <- .carryProbe(.cs$evid, .cs$dose, .cs$theta, .cs$M, .cs$add, 2L, 1L)
+  # the probe errors if a state before the carry is written
+  .b <- .carryProbe(
+    .cs$evid,
+    .cs$dose,
+    .cs$theta,
+    .cs$M,
+    .cs$add,
+    2L,
+    1L,
+    inSolve = TRUE,
+    pad = 5L
+  )
+  expect_identical(.b, .a)
+})
+
+test_that("a row with no carry makes the rest of the subject's carry NA", {
+  .ev <- c(101L, 0L, 0L, 0L, 0L, 0L)
+  .d <- c(100, 0, 0, 0, 0, 0)
+  expect_identical(
+    .carryRun1(.ev, .d, inSolve = TRUE, nAll = 3L),
+    c(.carryRun1(.ev, .d)[1:3], rep(NA_real_, 3L))
+  )
+})

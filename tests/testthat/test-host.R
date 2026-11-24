@@ -57,7 +57,10 @@ test_that("the host field list keeps its released order", {
     "ind_linCmtOriginSS",
     "ind_linCmtOriginHist",
     "ind_linCmtOriginHistCap",
-    "ind_linCmtOriginHistW"
+    "ind_linCmtOriginHistW",
+    "ind_n_all_times",
+    "op_numLinCarry",
+    "ind_linCmtCarryRow"
   )
   .nm <- .rxode2lincmtHostFieldNames()
   expect_gte(length(.nm), length(.frozen))

@@ -23,6 +23,11 @@
   check runs before the rest of the per-row work. Results are bitwise
   unchanged ([\#2](https://github.com/nlmixr2/rxode2lincmt/issues/2)).
 
+- `linCmt()` value-only solves (SAEM, `rxSolve()` simulation, pred-only
+  solves) return an already-solved row before any model setup. Results
+  are bitwise unchanged
+  ([\#9](https://github.com/nlmixr2/rxode2lincmt/issues/9)).
+
 ### Bug fixes
 
 - The `linCmt()` sensitivity carry, which ‘nlmixr2est’ uses for the

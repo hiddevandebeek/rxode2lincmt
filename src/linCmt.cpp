@@ -3668,20 +3668,17 @@ static inline int linCmtBhessFrom(linCmtBind &wsp, int idx) {
 
 // A row linCmtB() restores: serve the record's Hessians.  hessHave is 1 for
 // a solved record, 2 for one marked NA; a record that inherits from an NA
-// one is NA too.  With nothing solved yet, only the first record (its
-// parameter-free initial conditions) has a Hessian, zero; any later one was
-// advanced by a path that kept no Hessians, so it is NA rather than a
-// silent zero.
+// one is NA too.  With nothing solved yet the record is still at the
+// parameter-free initial conditions -- the first record, or records at the
+// same time as it (an observation at the dose time): every step that
+// advances the amounts goes through linCmtBhessStep, which marks it -- so its
+// amount Hessians are zero.
 static inline void linCmtBhessRestore(rx_solve *rx, linCmtBind &wsp, int idx,
                                       int ncmt, int oral0) {
   if ((RXS(rx, ndiff) & diffHess) == 0) return;
   double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
   int from = linCmtBhessFrom(wsp, idx);
   if (from < 0) {
-    if (idx > 0) {
-      wsp.hessCur = -1;
-      return;
-    }
     std::fill(slot, slot + wsp.hessStride, 0.0);
     from = idx; // zeros, served from this slot but not marked solved
   } else if (wsp.hessHave[from] == 2) {

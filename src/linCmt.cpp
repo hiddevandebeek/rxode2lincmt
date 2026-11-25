@@ -4152,106 +4152,88 @@ static double linCmtBhessRead(linCmtBind &wsp, int ncmt, int oral0,
 // replace/multiply).
 #define RX_LINCMT_ETA_MAX 16
 
-static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
-                                 linCmtBind &wsp, double _t, int ncmt, int oral0,
-                                 int which1, int which2, int trans,
-                                 double p1, double v1, double p2, double p3,
-                                 double p4, double p5, double ka) {
-  rx_solving_options *op = RXS(rx, op);
+// The eta-space carry's buffers (allocated on first use).
+static inline void linCmtBetaAlloc(linCmtBind &wsp) {
   const int E = RX_LINCMT_ETA_MAX;
-  int m = ncmt + oral0, n = 2*ncmt + oral0;
-  if (wsp.etaG.empty()) {
-    wsp.etaG.assign((size_t)7*E, 0.0);
-    wsp.etaGG.assign((size_t)7*E*E, 0.0);
-    wsp.etaS1.assign((size_t)4*E, 0.0);
-    wsp.etaS2.assign((size_t)4*E*E, 0.0);
-    wsp.etaC1.assign((size_t)E, 0.0);
-    wsp.etaC2.assign((size_t)E*E, 0.0);
-    wsp.etaF1.assign((size_t)4*E, 0.0);
-    wsp.etaF2.assign((size_t)4*E*E, 0.0);
-  }
+  if (!wsp.etaG.empty()) return;
+  wsp.etaG.assign((size_t)7*E, 0.0);
+  wsp.etaGG.assign((size_t)7*E*E, 0.0);
+  wsp.etaS1.assign((size_t)4*E, 0.0);
+  wsp.etaS2.assign((size_t)4*E*E, 0.0);
+  wsp.etaC1.assign((size_t)E, 0.0);
+  wsp.etaC2.assign((size_t)E*E, 0.0);
+  wsp.etaF1.assign((size_t)4*E, 0.0);
+  wsp.etaF2.assign((size_t)4*E*E, 0.0);
+}
+
+// A first-order input (which1 = -30 per slot, -37 per compartment):
+// which2 = row*E + a.
+static inline void linCmtBetaSet1(linCmtBind &wsp, std::vector<double> &v, int rows,
+                                  int which2, double val) {
+  const int E = RX_LINCMT_ETA_MAX;
+  int r = which2 / E, a = which2 % E;
+  if (which2 < 0 || r >= rows) return;
+  v[r*E + a] = val;
+  if (a + 1 > wsp.etaN) wsp.etaN = a + 1;
+}
+
+// A second-order input (which1 = -31 per slot, -38 per compartment),
+// symmetric: which2 = (row*E + a)*E + b.
+static inline void linCmtBetaSet2(linCmtBind &wsp, std::vector<double> &v, int rows,
+                                  int which2, double val) {
+  const int E = RX_LINCMT_ETA_MAX;
+  int b = which2 % E, ra = which2 / E, a = ra % E, r = ra / E;
+  if (which2 < 0 || r >= rows) return;
+  v[(r*E + a)*E + b] = val;
+  v[(r*E + b)*E + a] = val;
+  int mx = a > b ? a : b;
+  if (mx + 1 > wsp.etaN) wsp.etaN = mx + 1;
+}
+
+// The carry's reads (which1 = -33 .. -36), NA once it is not valid.
+static inline double linCmtBetaRead(const linCmtBind &wsp, int m, int which1, int which2) {
+  const int E = RX_LINCMT_ETA_MAX;
+  if (!wsp.etaValid || which2 < 0) return NA_REAL;
   switch (which1) {
-  case -30: {
-    int k = which2 / E, a = which2 % E;
-    if (which2 < 0 || k >= 7) return 0.0;
-    wsp.etaG[k*E + a] = p2;
-    if (a + 1 > wsp.etaN) wsp.etaN = a + 1;
-    return 0.0;
+  case -33: return which2 < E ? wsp.etaC1[which2] : NA_REAL;
+  case -34: return which2 < E*E ? wsp.etaC2[which2] : NA_REAL;
+  case -35: return which2 / E < m ? wsp.etaS1[which2] : NA_REAL;
+  default:  return which2 / (E*E) < m ? wsp.etaS2[which2] : NA_REAL;
   }
-  case -31: {
-    int b = which2 % E, ka_ = which2 / E, a = ka_ % E, k = ka_ / E;
-    if (which2 < 0 || k >= 7) return 0.0;
-    wsp.etaGG[(k*E + a)*E + b] = p2;
-    wsp.etaGG[(k*E + b)*E + a] = p2;
-    int mx = a > b ? a : b;
-    if (mx + 1 > wsp.etaN) wsp.etaN = mx + 1;
-    return 0.0;
-  }
-  case -37: {
-    int c = which2 / E, a = which2 % E;
-    if (which2 < 0 || c >= 4) return 0.0;
-    wsp.etaF1[c*E + a] = p2;
-    if (a + 1 > wsp.etaN) wsp.etaN = a + 1;
-    return 0.0;
-  }
-  case -38: {
-    int b = which2 % E, ca = which2 / E, a = ca % E, c = ca / E;
-    if (which2 < 0 || c >= 4) return 0.0;
-    wsp.etaF2[(c*E + a)*E + b] = p2;
-    wsp.etaF2[(c*E + b)*E + a] = p2;
-    int mx = a > b ? a : b;
-    if (mx + 1 > wsp.etaN) wsp.etaN = mx + 1;
-    return 0.0;
-  }
-  case -33:
-    return (wsp.etaValid && which2 >= 0 && which2 < E) ? wsp.etaC1[which2] : NA_REAL;
-  case -34:
-    return (wsp.etaValid && which2 >= 0 && which2 < E*E) ? wsp.etaC2[which2] : NA_REAL;
-  case -35: {
-    if (!wsp.etaValid || which2 < 0 || which2 / E >= m) return NA_REAL;
-    return wsp.etaS1[which2];
-  }
-  case -36: {
-    if (!wsp.etaValid || which2 < 0 || which2 / (E*E) >= m) return NA_REAL;
-    return wsp.etaS2[which2];
-  }
-  case -32:
-    break;
-  default:
-    return NA_REAL;
-  }
-  // ---- advance ----
-  if (wsp.etaScan < 0) {
-    wsp.etaScan = linCmtSecondOrderUnsupported(ind, op, 1);
-    if (wsp.etaScan) wsp.etaValid = 0;
-  }
-  int idx = IND(ind, idx);
+}
+
+// Start the carry over when a new pass begins (the record or the time going
+// back, a reset record); returns whether it did.
+static inline bool linCmtBetaRestart(linCmtBind &wsp, rx_solving_options_ind *ind,
+                                     int idx, double _t) {
   bool restart = wsp.etaPrevIdx < 0 || idx < wsp.etaPrevIdx ||
     (!ISNAN(wsp.etaTlast) && _t < wsp.etaTlast) ||
     (idx >= 0 && getEvid(ind, IND(ind, ix)[idx]) == 3);
-  if (restart) {
-    std::fill(wsp.etaS1.begin(), wsp.etaS1.end(), 0.0);
-    std::fill(wsp.etaS2.begin(), wsp.etaS2.end(), 0.0);
-    wsp.etaTlast = NAN;
-    wsp.etaHavePrev = 0;
-    // a new pass re-detects, in order, every record the carry cannot follow;
-    // only what the subject-level scan refused stays refused
-    wsp.etaValid = wsp.etaScan ? 0 : 1;
-  }
-  double dt = ISNAN(wsp.etaTlast) ? 0.0 : (_t - wsp.etaTlast);
-  int from = (wsp.etaPrevIdx >= 0 && !restart) ? wsp.etaPrevIdx : idx;
-  wsp.etaTlast = _t;
-  wsp.etaPrevIdx = idx;
-  int nE = wsp.etaN;
-  stan::math::linCmtStan lc(ncmt, oral0, trans, true, linCmtNormal, 0);
-  Eigen::Matrix<double, -1, 1> th(lc.getNpars());
-  linCmtFillTheta(th, ncmt, oral0, p1, v1, p2, p3, p4, p5, ka);
-  // This row's local parameter model becomes the "previous" one for the
-  // next interval; keep a copy before choosing.
-  std::vector<double> Gcur = wsp.etaG, GGcur = wsp.etaGG;
+  if (!restart) return false;
+  std::fill(wsp.etaS1.begin(), wsp.etaS1.end(), 0.0);
+  std::fill(wsp.etaS2.begin(), wsp.etaS2.end(), 0.0);
+  wsp.etaTlast = NAN;
+  wsp.etaHavePrev = 0;
+  // a new pass re-detects, in order, every record the carry cannot follow;
+  // only what the subject-level scan refused stays refused
+  wsp.etaValid = wsp.etaScan ? 0 : 1;
+  return true;
+}
+
+// The interval's parameters and local parameter model.  The solve advanced
+// the interval with this row's parameters, or under locf with the previous
+// row's (solveTh records which).  th comes in as this row's and may be
+// replaced; *Guse and *GGuse point at the model to use (Gcur/GGcur, this
+// row's own, or the previous row's).
+static inline void linCmtBetaInterval(linCmtBind &wsp, int idx, double dt, int nE,
+                                      Eigen::Matrix<double, -1, 1> &th,
+                                      const std::vector<double> &Gcur,
+                                      const std::vector<double> &GGcur,
+                                      const double **Guse, const double **GGuse) {
   double Pcur[7];
   for (int i = 0; i < 7; i++) Pcur[i] = i < th.size() ? th(i) : 0.0;
-  const double *Guse = wsp.etaG.data(), *GGuse = wsp.etaGG.data();
+  *Guse = Gcur.data();
+  *GGuse = GGcur.data();
   if (nE > 0 && wsp.etaValid && dt != 0.0 && idx >= 0 &&
       idx < (int)wsp.solveThHave.size() && wsp.solveThHave[idx]) {
     const double *sth = &wsp.solveTh[(size_t)idx*7];
@@ -4264,77 +4246,124 @@ static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
       // the solve advanced this interval with the previous row's parameters
       // (locf): use that row's local parameter model
       for (int i = 0; i < th.size(); i++) th(i) = wsp.etaPprev[i];
-      Guse = wsp.etaGprev.data();
-      GGuse = wsp.etaGGprev.data();
+      *Guse = wsp.etaGprev.data();
+      *GGuse = wsp.etaGGprev.data();
     } else if (!cur) {
       wsp.etaValid = 0; // parameters the carry cannot attribute
     }
   }
   memcpy(wsp.etaPprev, Pcur, sizeof(Pcur));
-  wsp.etaGprev.swap(Gcur);
-  wsp.etaGGprev.swap(GGcur);
   wsp.etaHavePrev = 1;
-  if (nE == 0 || !wsp.etaValid) return 0.0;
-  const double *A = getAdvan(from);
-  const double *r = linCmtBcarryRate(ind, op, idx);
-  lc.setRate(const_cast<double*>(r));
-  lc.setDt(dt);
-  std::vector<double> S1n((size_t)4*E, 0.0), S2n((size_t)4*E*E, 0.0);
-  double val = 0.0;
-  lc.linCmtEtaStep(th, A, nE, E, Guse, GGuse,
-                   wsp.etaS1.data(), wsp.etaS2.data(), S1n.data(), S2n.data(),
-                   wsp.etaC1.data(), wsp.etaC2.data(), &val);
-  (void)n;
-  wsp.etaS1.swap(S1n);
-  wsp.etaS2.swap(S2n);
-  // A bolus on this row: its eta dependence through F joins the state
-  // (amounts first, depot included when oral).  Infusions with a modeled F
-  // are not followed: they are excluded by the origin redistribution gate
-  // only when nlmixr2est marks them, so refuse them here as well.
-  if (idx >= 0) {
-    int evid = getEvid(ind, IND(ind, ix)[idx]);
-    int wh, cmt, wh100, whI, wh0;
-    getWh(evid, &wh, &cmt, &wh100, &whI, &wh0);
-    int c = cmt - OPT(op, linOffset);
-    if (evid >= 100 && c >= 0 && c < m) { // an encoded dose record
-      if (whI == EVIDF_NORMAL && wh0 == EVID0_REGULAR) {
-        double amt = getDose(ind, IND(ind, ix)[idx]);
-        for (int a = 0; a < nE; a++) {
-          wsp.etaS1[c*E + a] += amt*wsp.etaF1[c*E + a];
-          for (int b = 0; b < nE; b++) {
-            wsp.etaS2[(c*E + a)*E + b] += amt*wsp.etaF2[(c*E + a)*E + b];
-          }
-        }
-      } else if (whI == EVIDF_REPLACE) {
-        // the compartment is set to F*amt: its eta derivatives are amt times
-        // F's (zero without a modeled F), whatever came before
-        double amt = getDose(ind, IND(ind, ix)[idx]);
-        for (int a = 0; a < nE; a++) {
-          wsp.etaS1[c*E + a] = amt*wsp.etaF1[c*E + a];
-          for (int b = 0; b < nE; b++) {
-            wsp.etaS2[(c*E + a)*E + b] = amt*wsp.etaF2[(c*E + a)*E + b];
-          }
-        }
-      } else if (whI == EVIDF_MULT) {
-        // the compartment is scaled by its factor; with a modeled F the
-        // factor is F*amt, whose value the carry does not have
-        bool anyF = (OPT(op, linCmtOriginMask) & (1 << c)) != 0;
-        for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
-        if (anyF) {
-          wsp.etaValid = 0;
-        } else {
-          double k = getDose(ind, IND(ind, ix)[idx]);
-          for (int a = 0; a < nE; a++) {
-            wsp.etaS1[c*E + a] *= k;
-            for (int b = 0; b < nE; b++) wsp.etaS2[(c*E + a)*E + b] *= k;
-          }
-        }
-      } else {
-        bool anyF = false;
-        for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
-        if (anyF) wsp.etaValid = 0; // a modeled F on an infusion
-      }
+}
+
+// One eta derivative of a dosed compartment through its dose record: a
+// bolus adds amt times F's, a replace sets it to that, a multiply scales it
+// by the factor (amt).
+static inline void linCmtBetaJump(double &s, double f, int whI, double amt) {
+  if (whI == EVIDF_MULT) {
+    s *= amt;
+  } else if (whI == EVIDF_REPLACE) {
+    s = amt*f;
+  } else {
+    s += amt*f;
+  }
+}
+
+// The dose record on this row, applied after its step (amounts first, the
+// depot included when oral).  A multiply with a modeled F (factor F*amt,
+// whose value the carry does not have) and an infusion with a modeled F
+// are refused.
+static inline void linCmtBetaEvent(linCmtBind &wsp, rx_solving_options_ind *ind,
+                                   rx_solving_options *op, int idx, int m, int nE) {
+  const int E = RX_LINCMT_ETA_MAX;
+  if (idx < 0) return;
+  int evid = getEvid(ind, IND(ind, ix)[idx]);
+  int wh, cmt, wh100, whI, wh0;
+  getWh(evid, &wh, &cmt, &wh100, &whI, &wh0);
+  int c = cmt - OPT(op, linOffset);
+  if (evid < 100 || c < 0 || c >= m) return; // not an encoded dose record
+  bool anyF = false;
+  for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
+  bool bolus = whI == EVIDF_NORMAL && wh0 == EVID0_REGULAR;
+  if (!bolus && whI != EVIDF_REPLACE && whI != EVIDF_MULT) {
+    if (anyF) wsp.etaValid = 0; // a modeled F on an infusion
+    return;
+  }
+  if (whI == EVIDF_MULT && (anyF || (OPT(op, linCmtOriginMask) & (1 << c)) != 0)) {
+    wsp.etaValid = 0;
+    return;
+  }
+  double amt = getDose(ind, IND(ind, ix)[idx]);
+  for (int a = 0; a < nE; a++) {
+    linCmtBetaJump(wsp.etaS1[c*E + a], wsp.etaF1[c*E + a], whI, amt);
+    for (int b = 0; b < nE; b++) {
+      linCmtBetaJump(wsp.etaS2[(c*E + a)*E + b], wsp.etaF2[(c*E + a)*E + b], whI, amt);
     }
   }
-  return 0.0;
+}
+
+// The -32 advance: one step of the carry from the previous record.
+static inline void linCmtBetaAdvance(rx_solving_options_ind *ind, rx_solving_options *op,
+                                     linCmtBind &wsp, double _t, int ncmt, int oral0,
+                                     int trans, double p1, double v1, double p2, double p3,
+                                     double p4, double p5, double ka) {
+  const int E = RX_LINCMT_ETA_MAX;
+  if (wsp.etaScan < 0) {
+    wsp.etaScan = linCmtSecondOrderUnsupported(ind, op, 1);
+    if (wsp.etaScan) wsp.etaValid = 0;
+  }
+  int idx = IND(ind, idx);
+  bool restart = linCmtBetaRestart(wsp, ind, idx, _t);
+  double dt = ISNAN(wsp.etaTlast) ? 0.0 : (_t - wsp.etaTlast);
+  int from = (wsp.etaPrevIdx >= 0 && !restart) ? wsp.etaPrevIdx : idx;
+  wsp.etaTlast = _t;
+  wsp.etaPrevIdx = idx;
+  int nE = wsp.etaN;
+  stan::math::linCmtStan lc(ncmt, oral0, trans, true, linCmtNormal, 0);
+  Eigen::Matrix<double, -1, 1> th(lc.getNpars());
+  linCmtFillTheta(th, ncmt, oral0, p1, v1, p2, p3, p4, p5, ka);
+  // this row's local parameter model becomes the previous one for the next
+  // interval
+  std::vector<double> Gcur = wsp.etaG, GGcur = wsp.etaGG;
+  const double *Guse = NULL, *GGuse = NULL;
+  linCmtBetaInterval(wsp, idx, dt, nE, th, Gcur, GGcur, &Guse, &GGuse);
+  if (nE > 0 && wsp.etaValid) {
+    const double *A = getAdvan(from);
+    const double *r = linCmtBcarryRate(ind, op, idx);
+    lc.setRate(const_cast<double*>(r));
+    lc.setDt(dt);
+    std::vector<double> S1n((size_t)4*E, 0.0), S2n((size_t)4*E*E, 0.0);
+    double val = 0.0;
+    lc.linCmtEtaStep(th, A, nE, E, Guse, GGuse,
+                     wsp.etaS1.data(), wsp.etaS2.data(), S1n.data(), S2n.data(),
+                     wsp.etaC1.data(), wsp.etaC2.data(), &val);
+    wsp.etaS1.swap(S1n);
+    wsp.etaS2.swap(S2n);
+  }
+  // after the step has used the previous row's model (Guse may point at it)
+  wsp.etaGprev.swap(Gcur);
+  wsp.etaGGprev.swap(GGcur);
+  if (nE > 0 && wsp.etaValid) linCmtBetaEvent(wsp, ind, op, idx, ncmt + oral0, nE);
+}
+
+static double linCmtBetaSentinel(rx_solve *rx, rx_solving_options_ind *ind,
+                                 linCmtBind &wsp, double _t, int ncmt, int oral0,
+                                 int which1, int which2, int trans,
+                                 double p1, double v1, double p2, double p3,
+                                 double p4, double p5, double ka) {
+  linCmtBetaAlloc(wsp);
+  switch (which1) {
+  case -30: linCmtBetaSet1(wsp, wsp.etaG, 7, which2, p2); return 0.0;
+  case -31: linCmtBetaSet2(wsp, wsp.etaGG, 7, which2, p2); return 0.0;
+  case -37: linCmtBetaSet1(wsp, wsp.etaF1, 4, which2, p2); return 0.0;
+  case -38: linCmtBetaSet2(wsp, wsp.etaF2, 4, which2, p2); return 0.0;
+  case -33: case -34: case -35: case -36:
+    return linCmtBetaRead(wsp, ncmt + oral0, which1, which2);
+  case -32:
+    linCmtBetaAdvance(ind, RXS(rx, op), wsp, _t, ncmt, oral0, trans,
+                      p1, v1, p2, p3, p4, p5, ka);
+    return 0.0;
+  default:
+    return NA_REAL;
+  }
 }

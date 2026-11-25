@@ -3705,22 +3705,14 @@ static inline void linCmtBhessRestore(rx_solve *rx, linCmtBind &wsp, int idx,
   wsp.hessCur = from;
 }
 
-// A row linCmtB() solves, called with the kernel state set for the row and
-// before the Jacobian (a steady-state re-solve may overwrite the prior
-// amounts).  ad: the row takes the AD Jacobian path.
-static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
-                                   rx_solving_options_ind *ind,
-                                   rx_solving_options *op, int idx,
-                                   int ncmt, int oral0, bool ad,
-                                   Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
-  if (!linCmtHessOn(rx)) return;
-  // A step at a record before the last one taken is a new solve of the
-  // subject (an estimator re-solves the same subject at new etas: its
-  // solver starts again from the first record).  The history belongs to
-  // the previous solve -- its parameters, its last record -- so it starts
-  // over -- also when it starts at the record the last one ended on (a
-  // subject with one solved record).  A steady-state solve repeats its
-  // record (doSS) and keeps it.
+// A step at a record before the last one taken is a new solve of the
+// subject (an estimator re-solves the same subject at new etas: its solver
+// starts again from the first record).  The history belongs to the previous
+// solve -- its parameters, its last record -- so it starts over -- also when
+// it starts at the record the last one ended on (a subject with one solved
+// record).  A steady-state solve repeats its record (doSS) and keeps it.
+static inline void linCmtBhessNewSolve(linCmtBind &wsp, rx_solving_options_ind *ind,
+                                       rx_solving_options *op, int idx) {
   if (wsp.hessLast >= 0 &&
       (idx < wsp.hessLast || (idx == wsp.hessLast && !IND(ind, doSS)))) {
     std::fill(wsp.hessHave.begin(), wsp.hessHave.end(), (char)0);
@@ -3731,19 +3723,37 @@ static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
   if (wsp.hessUnsupported < 0) {
     wsp.hessUnsupported = linCmtSecondOrderUnsupported(ind, op, 0);
   }
-  double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
-  // Parameters that change between steps (time-varying covariates): the
-  // quadratic carry is an expansion around one parameter vector, so the
-  // subject's Hessians are NA from the change on.
+}
+
+// Parameters that change between steps (time-varying covariates): the
+// quadratic carry is an expansion around one parameter vector, so the
+// subject's Hessians are NA from the change on.  Then records this step's.
+static inline void linCmtBhessTheta(linCmtBind &wsp,
+                                    Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
+  int n = theta.size() < 7 ? (int)theta.size() : 7;
   if (wsp.hessLast >= 0 && wsp.hessUnsupported == 0) {
-    for (int i = 0; i < theta.size() && i < 7; i++) {
+    for (int i = 0; i < n; i++) {
       if (!linCmtSameBits(theta(i), wsp.hessTheta[i])) {
         wsp.hessUnsupported = 1;
         break;
       }
     }
   }
-  for (int i = 0; i < theta.size() && i < 7; i++) wsp.hessTheta[i] = theta(i);
+  for (int i = 0; i < n; i++) wsp.hessTheta[i] = theta(i);
+}
+
+// A row linCmtB() solves, called with the kernel state set for the row and
+// before the Jacobian (a steady-state re-solve may overwrite the prior
+// amounts).  ad: the row takes the AD Jacobian path.
+static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
+                                   rx_solving_options_ind *ind,
+                                   rx_solving_options *op, int idx,
+                                   int ncmt, int oral0, bool ad,
+                                   Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
+  if (!linCmtHessOn(rx)) return;
+  linCmtBhessNewSolve(wsp, ind, op, idx);
+  double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
+  linCmtBhessTheta(wsp, theta);
   if (!ad || !linCmtSensIsAD(RXS(rx, sensType)) || wsp.hessUnsupported) {
     wsp.hessHave[idx] = 2; // NA, and so is anything inheriting from it
     wsp.hessCur = -1;
@@ -4225,6 +4235,24 @@ static inline bool linCmtBetaRestart(linCmtBind &wsp, rx_solving_options_ind *in
 // row's (solveTh records which).  th comes in as this row's and may be
 // replaced; *Guse and *GGuse point at the model to use (Gcur/GGcur, this
 // row's own, or the previous row's).
+static inline bool linCmtSameBitsN(const double *a, const double *b, int n) {
+  for (int i = 0; i < n; i++) {
+    if (!linCmtSameBits(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+// The parameters the solve advanced row idx's interval with, or NULL when
+// there is no carry to attribute (none, invalid, a zero interval, unknown).
+static inline const double *linCmtBetaSolveTh(linCmtBind &wsp, int idx, double dt,
+                                              int nE) {
+  if (nE <= 0 || !wsp.etaValid || dt == 0.0 || idx < 0 ||
+      idx >= (int)wsp.solveThHave.size() || !wsp.solveThHave[idx]) {
+    return NULL;
+  }
+  return &wsp.solveTh[(size_t)idx*7];
+}
+
 static inline void linCmtBetaInterval(linCmtBind &wsp, int idx, double dt, int nE,
                                       Eigen::Matrix<double, -1, 1> &th,
                                       const std::vector<double> &Gcur,
@@ -4234,14 +4262,11 @@ static inline void linCmtBetaInterval(linCmtBind &wsp, int idx, double dt, int n
   for (int i = 0; i < 7; i++) Pcur[i] = i < th.size() ? th(i) : 0.0;
   *Guse = Gcur.data();
   *GGuse = GGcur.data();
-  if (nE > 0 && wsp.etaValid && dt != 0.0 && idx >= 0 &&
-      idx < (int)wsp.solveThHave.size() && wsp.solveThHave[idx]) {
-    const double *sth = &wsp.solveTh[(size_t)idx*7];
-    bool cur = true, prev = wsp.etaHavePrev != 0;
-    for (int i = 0; i < th.size(); i++) {
-      if (!linCmtSameBits(sth[i], Pcur[i])) cur = false;
-      if (prev && !linCmtSameBits(sth[i], wsp.etaPprev[i])) prev = false;
-    }
+  const double *sth = linCmtBetaSolveTh(wsp, idx, dt, nE);
+  if (sth != NULL) {
+    int n = (int)th.size();
+    bool cur = linCmtSameBitsN(sth, Pcur, n);
+    bool prev = wsp.etaHavePrev != 0 && linCmtSameBitsN(sth, wsp.etaPprev, n);
     if (!cur && prev) {
       // the solve advanced this interval with the previous row's parameters
       // (locf): use that row's local parameter model
@@ -4273,6 +4298,26 @@ static inline void linCmtBetaJump(double &s, double f, int whI, double amt) {
 // depot included when oral).  A multiply with a modeled F (factor F*amt,
 // whose value the carry does not have) and an infusion with a modeled F
 // are refused.
+// Whether a dose into compartment c changes the carry (a bolus, a replace or
+// a multiply); marks the carry invalid when the dose is one it cannot follow
+// (a modeled F on an infusion, a multiply of a modeled or origin amount).
+static inline bool linCmtBetaEventCarries(linCmtBind &wsp, rx_solving_options *op,
+                                          int c, int whI, int wh0, int nE) {
+  const int E = RX_LINCMT_ETA_MAX;
+  bool anyF = false;
+  for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
+  bool bolus = whI == EVIDF_NORMAL && wh0 == EVID0_REGULAR;
+  if (!bolus && whI != EVIDF_REPLACE && whI != EVIDF_MULT) {
+    if (anyF) wsp.etaValid = 0; // a modeled F on an infusion
+    return false;
+  }
+  if (whI == EVIDF_MULT && (anyF || (OPT(op, linCmtOriginMask) & (1 << c)) != 0)) {
+    wsp.etaValid = 0;
+    return false;
+  }
+  return true;
+}
+
 static inline void linCmtBetaEvent(linCmtBind &wsp, rx_solving_options_ind *ind,
                                    rx_solving_options *op, int idx, int m, int nE) {
   const int E = RX_LINCMT_ETA_MAX;
@@ -4282,17 +4327,7 @@ static inline void linCmtBetaEvent(linCmtBind &wsp, rx_solving_options_ind *ind,
   getWh(evid, &wh, &cmt, &wh100, &whI, &wh0);
   int c = cmt - OPT(op, linOffset);
   if (evid < 100 || c < 0 || c >= m) return; // not an encoded dose record
-  bool anyF = false;
-  for (int a = 0; a < nE && !anyF; a++) anyF = wsp.etaF1[c*E + a] != 0.0;
-  bool bolus = whI == EVIDF_NORMAL && wh0 == EVID0_REGULAR;
-  if (!bolus && whI != EVIDF_REPLACE && whI != EVIDF_MULT) {
-    if (anyF) wsp.etaValid = 0; // a modeled F on an infusion
-    return;
-  }
-  if (whI == EVIDF_MULT && (anyF || (OPT(op, linCmtOriginMask) & (1 << c)) != 0)) {
-    wsp.etaValid = 0;
-    return;
-  }
+  if (!linCmtBetaEventCarries(wsp, op, c, whI, wh0, nE)) return;
   double amt = getDose(ind, IND(ind, ix)[idx]);
   for (int a = 0; a < nE; a++) {
     linCmtBetaJump(wsp.etaS1[c*E + a], wsp.etaF1[c*E + a], whI, amt);

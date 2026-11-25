@@ -72,6 +72,225 @@ static int lcSimEvid(int cmt, int infusion) {
   return (infusion ? 10000 : 0) + 100*(cmt + 1) + 1;
 }
 
+// The records, the per-record call arguments and the stand-in structs with
+// the buffers they point at.
+struct lcSim {
+  NumericVector t, doseAmt, doseRate, ssTau, ssVar;
+  IntegerVector doseCmt, ss, ssCmt;
+  NumericMatrix theta;
+  int n, ncmt, oral0, trans, m, neq;
+  bool useB;
+  int hPar;
+  double hStep;
+  lcSimRx rx;
+  lcSimOp op;
+  lcSimInd ind;
+  std::vector<double> solve, inits, save, infRate, dose, h;
+  std::vector<int> ix, evid, idose;
+  double scale[7] = {0, 0, 0, 0, 0, 0, 0};
+  int extraEvid = 0;
+  double extraDose = 0.0;
+  ptrdiff_t saved[lcOffN];
+  lcHostFn_getTime savedGetTime;
+  lcHostFn_getRxSolve savedGetRx;
+
+  double call(int i, int which1, int which2) {
+    rx_solve *prx = (rx_solve*)&rx;
+    if (useB) {
+      return linCmtB(prx, 0, t[i], 0, ncmt, oral0, which1, which2, trans,
+                     theta(i, 0), theta(i, 1), theta(i, 2), theta(i, 3),
+                     theta(i, 4), theta(i, 5), theta(i, 6));
+    }
+    return linCmtA(prx, 0, t[i], 0, ncmt, oral0, which1, trans,
+                   theta(i, 0), theta(i, 1), theta(i, 2), theta(i, 3),
+                   theta(i, 4), theta(i, 5), theta(i, 6));
+  }
+
+  // the record's dose, as rxode2's handle_evid() applies it
+  void applyDose(int i, double *yp, bool rateOnly) {
+    if (doseCmt[i] < 0) return;
+    if (doseRate[i] != 0.0) {
+      infRate[doseCmt[i]] += doseRate[i];
+    } else if (!rateOnly) {
+      yp[doseCmt[i]] += doseAmt[i];
+    }
+  }
+
+  void fillRecords() {
+    ix.resize(n);
+    evid.assign(n, 0);
+    dose.assign(n, 0.0);
+    for (int i = 0; i < n; i++) {
+      ix[i] = i;
+      if (doseCmt[i] >= 0) {
+        int inf = doseRate[i] != 0.0;
+        evid[i] = lcSimEvid(doseCmt[i], inf);
+        dose[i] = inf ? doseRate[i] : doseAmt[i];
+        idose.push_back(i);
+      }
+    }
+  }
+
+  void setupStructs(int sensType, int ndiff, int sensPhi, int lagMask, int originMask) {
+    memset(&rx, 0, sizeof(rx));
+    memset(&op, 0, sizeof(op));
+    memset(&ind, 0, sizeof(ind));
+    solve.assign((size_t)n*neq, 0.0);
+    inits.assign(neq, 0.0);
+    save.assign(neq, 0.0);
+    infRate.assign(neq, 0.0);
+    rx.subjects = (rx_solving_options_ind*)&ind;
+    rx.op = (rx_solving_options*)&op;
+    rx.ndiff = ndiff;
+    rx.sensType = sensType;
+    rx.linCmtScale = scale;
+    rx.linCmtSensPhi = sensPhi;
+    rx.linCmtSuspect = 1e-6;
+    rx.linCmtForwardMax = 2;  // rxode2's rxControl() default
+    op.neq = neq;
+    op.inits = inits.data();
+    op.numLin = m;
+    op.linCmtLagMask = lagMask;
+    op.linCmtOriginMask = originMask;
+    ind.idose = idose.empty() ? NULL : idose.data();
+    ind.ndoses = (int)idose.size();
+    ind.InfusionRate = infRate.data();
+    ind.ix = ix.data();
+    ind.solve = solve.data();
+    ind.neqOverride = -1;
+    ind.evid = evid.data();
+    ind.extraDoseEvid = &extraEvid;
+    ind.dose = dose.data();
+    ind.extraDoseDose = &extraDose;
+    ind.linCmtSave = save.data();
+    ind.linH = h.data();
+    ind.linCmtHparIndex = -2;
+    ind.linCmtH = NA_REAL;
+    ind.linCmtCarryTlast = NA_REAL;
+    ind.linCmtCarryRow = -1;
+    ind.n_all_times = n;
+  }
+
+  // Point the host table at the stand-ins; nothing until unbind() calls back
+  // into R with an error.
+  void bind() {
+    memcpy(saved, _lcOff, sizeof(saved));
+    savedGetTime = _lcHost_getTime;
+    savedGetRx = _lcHost_getRxSolve;
+    _lcOff[lcOffIndSize] = sizeof(lcSimInd);
+    _lcOff[lcOffCarryMax] = RXLC_CARRY_MAXPAIRS;
+    _lcOff[lcOffOriginMax] = RXLC_ORIGIN_MAX;
+    RXLC_HOST_FIELDS(LCSIM_OFF_)
+    lcSimRxCur = &rx;
+    lcSimTimes.assign(t.begin(), t.end());
+    _lcHost_getTime = &lcSimGetTime;
+    _lcHost_getRxSolve = &lcSimGetRxSolve;
+    ensureLinCmtA(1);
+    ensureLinCmtB(1);
+  }
+
+  void freeInd() {
+    linCmtFreeInd((rx_solving_options_ind*)&ind);
+    linCmtBindFree((rx_solving_options_ind*)&ind);
+  }
+
+  void unbind() {
+    freeInd();
+    memcpy(_lcOff, saved, sizeof(saved));
+    _lcHost_getTime = savedGetTime;
+    _lcHost_getRxSolve = savedGetRx;
+    lcSimRxCur = NULL;
+  }
+
+  // a steady-state record: rxode2 switches the record's infusion on first,
+  // then solves the steady state; returns whether the infusion was applied
+  bool setupSs(int i, double *yp) {
+    ind.linSS = ss[i];
+    ind.doSS = ss[i] != 0;
+    if (ss[i] == 0) return false;
+    ind.linSStau = ssTau[i];
+    ind.linSSvar = ssVar[i];
+    ind.linSSbolusCmt = ssCmt[i];
+    bool ssInf = doseCmt[i] >= 0 && doseRate[i] != 0.0;
+    if (ssInf) applyDose(i, yp, true);
+    return ssInf;
+  }
+
+  // the model's value call advancing record i from the previous record
+  void advance(int i, double xp, double *yp, NumericVector &val) {
+    ind.linCmtAlast = yp;
+    ind.tprior = xp;
+    ind.tout = t[i];
+    if (hPar >= 0) {
+      ind.linCmtHparIndex = hPar;
+      ind.linCmtH = hStep;
+    }
+    val[i] = call(i, -1, useB ? -1 : 0);
+    ind.linCmtHparIndex = -2;
+    ind.linCmtH = NA_REAL;
+    std::copy(save.begin(), save.begin() + neq, yp);
+  }
+
+  // rxode2's linear-only solve loop (ind_linSolve)
+  void solvePass(NumericVector &val) {
+    std::fill(solve.begin(), solve.end(), 0.0);
+    std::fill(infRate.begin(), infRate.end(), 0.0);
+    double xp = t[0];
+    ind._rxFlag = 1;
+    ind.solvedIdx = 0;
+    for (int i = 0; i < n; i++) {
+      double *yp = solve.data() + (size_t)i*neq;
+      if (i > 0) std::copy(yp - neq, yp, yp);
+      ind.idx = i;
+      bool ssInf = setupSs(i, yp);
+      if (t[i] != xp || ss[i] != 0) advance(i, xp, yp, val);
+      if (!ssInf) applyDose(i, yp, false);
+      ind.doSS = 0;
+      ind.linSS = 0;
+      xp = t[i];
+      ind.solvedIdx = i;
+    }
+  }
+
+  // rxode2's output pass: the model re-runs on every solved record
+  void outputPass(const IntegerMatrix &calls, NumericVector &lhs, NumericMatrix &callOut) {
+    ind._rxFlag = 11;
+    for (int i = 0; i < n; i++) {
+      ind.idx = i;
+      lhs[i] = call(i, -1, useB ? -1 : 0);
+      for (int k = 0; k < calls.nrow(); k++) {
+        callOut(i, k) = call(i, calls(k, 0), useB ? calls(k, 1) : 0);
+      }
+    }
+  }
+
+  NumericMatrix state() const {
+    NumericMatrix out(n, neq);
+    for (int i = 0; i < n; i++) {
+      for (int j = 0; j < neq; j++) out(i, j) = solve[(size_t)i*neq + j];
+    }
+    return out;
+  }
+};
+
+static void lcSimCheck(int n, int m, int ncmt, int oral0, IntegerVector doseCmt,
+                       NumericVector doseAmt, NumericVector doseRate,
+                       NumericMatrix theta, IntegerMatrix calls, NumericVector linH,
+                       IntegerVector ss, NumericVector ssTau, NumericVector ssVar,
+                       IntegerVector ssCmt) {
+  bool lens = doseCmt.size() == n && doseAmt.size() == n && doseRate.size() == n &&
+    ss.size() == n && ssTau.size() == n && ssVar.size() == n && ssCmt.size() == n;
+  if (n < 1 || ncmt < 1 || ncmt > 3 || oral0 < 0 || oral0 > 1 || !lens ||
+      theta.nrow() != n || theta.ncol() != 7 || calls.ncol() != 2 || linH.size() != 7) {
+    Rcpp::stop("linCmtHostSim: inconsistent inputs");
+  }
+  for (int i = 0; i < n; i++) {
+    if (doseCmt[i] >= m || ss[i] < 0 || ss[i] > 3) {
+      Rcpp::stop("linCmtHostSim: dose or steady state out of range at record %d", i + 1);
+    }
+  }
+}
+
 //' Solve one synthetic subject through linCmtA()/linCmtB() (test hook)
 //'
 //' Replays rxode2's linear-only solve loop on local stand-ins for its solver
@@ -120,199 +339,34 @@ List linCmtHostSim(NumericVector t, IntegerVector doseCmt, NumericVector doseAmt
                    int lagMask, int originMask, int hPar, double hStep) {
   int n = t.size();
   int m = ncmt + oral0;
-  if (n < 1 || ncmt < 1 || ncmt > 3 || oral0 < 0 || oral0 > 1 ||
-      doseCmt.size() != n || doseAmt.size() != n || doseRate.size() != n ||
-      theta.nrow() != n || theta.ncol() != 7 || calls.ncol() != 2 ||
-      linH.size() != 7 || ss.size() != n || ssTau.size() != n ||
-      ssVar.size() != n || ssCmt.size() != n) {
-    Rcpp::stop("linCmtHostSim: inconsistent inputs");
-  }
-  for (int i = 0; i < n; i++) {
-    if (doseCmt[i] >= m || ss[i] < 0 || ss[i] > 3) {
-      Rcpp::stop("linCmtHostSim: dose or steady state out of range at record %d", i + 1);
-    }
-  }
+  lcSimCheck(n, m, ncmt, oral0, doseCmt, doseAmt, doseRate, theta, calls, linH,
+             ss, ssTau, ssVar, ssCmt);
+  lcSim sim;
+  sim.t = t; sim.doseCmt = doseCmt; sim.doseAmt = doseAmt; sim.doseRate = doseRate;
+  sim.theta = theta; sim.ss = ss; sim.ssTau = ssTau; sim.ssVar = ssVar; sim.ssCmt = ssCmt;
+  sim.n = n; sim.ncmt = ncmt; sim.oral0 = oral0; sim.trans = trans; sim.m = m;
+  sim.useB = useB; sim.hPar = hPar; sim.hStep = hStep;
   // the state width: amounts, then (linCmtB) their sensitivities
-  int npars = 2*ncmt + oral0;
-  int nSave = useB ? (m + ncmt*npars + oral0) : m;
-  int neq = nSave;
-
-  lcSimRx rx;
-  lcSimOp op;
-  lcSimInd ind;
-  memset(&rx, 0, sizeof(rx));
-  memset(&op, 0, sizeof(op));
-  memset(&ind, 0, sizeof(ind));
-
-  std::vector<double> solve((size_t)n*neq, 0.0);
-  std::vector<double> inits(neq, 0.0);
-  std::vector<double> save(neq, 0.0);
-  std::vector<double> infRate(neq, 0.0);
-  std::vector<int> ix(n), evid(n, 0), idose;
-  std::vector<double> dose(n, 0.0);
-  std::vector<double> h(linH.begin(), linH.end());
-  double scale[7] = {0, 0, 0, 0, 0, 0, 0};
-  for (int i = 0; i < n; i++) {
-    ix[i] = i;
-    if (doseCmt[i] >= 0) {
-      int inf = doseRate[i] != 0.0;
-      evid[i] = lcSimEvid(doseCmt[i], inf);
-      dose[i] = inf ? doseRate[i] : doseAmt[i];
-      idose.push_back(i);
-    }
-  }
-  int extraEvid = 0;
-  double extraDose = 0.0;
-
-  rx.subjects = (rx_solving_options_ind*)&ind;
-  rx.op = (rx_solving_options*)&op;
-  rx.ndiff = ndiff;
-  rx.sensType = sensType;
-  rx.linCmtScale = scale;
-  rx.linCmtSensPhi = sensPhi;
-  rx.linCmtSuspect = 1e-6;
-  rx.linCmtForwardMax = 2;  // rxode2's rxControl() default
-  op.neq = neq;
-  op.inits = inits.data();
-  op.numLin = m;
-  op.linOffset = 0;
-  op.linCmtLagMask = lagMask;
-  op.linCmtOriginMask = originMask;
-  op.numLinCarry = 0;
-  ind.idose = idose.empty() ? NULL : idose.data();
-  ind.ndoses = (int)idose.size();
-  ind.InfusionRate = infRate.data();
-  ind.ix = ix.data();
-  ind.solve = solve.data();
-  ind.neqOverride = -1;
-  ind.evid = evid.data();
-  ind.extraDoseEvid = &extraEvid;
-  ind.dose = dose.data();
-  ind.extraDoseDose = &extraDose;
-  ind.linCmtSave = save.data();
-  ind.linH = h.data();
-  ind.linCmtHparIndex = -2;
-  ind.linCmtH = NA_REAL;
-  ind.linCmtCarryTlast = NA_REAL;
-  ind.linCmtCarryRow = -1;
-  ind.n_all_times = n;
-
-  // Point the host table at the stand-ins; nothing below calls back into R
-  // with an error until the table is restored.
-  ptrdiff_t saved[lcOffN];
-  memcpy(saved, _lcOff, sizeof(saved));
-  lcHostFn_getTime savedGetTime = _lcHost_getTime;
-  lcHostFn_getRxSolve savedGetRx = _lcHost_getRxSolve;
-  _lcOff[lcOffIndSize] = sizeof(lcSimInd);
-  _lcOff[lcOffCarryMax] = RXLC_CARRY_MAXPAIRS;
-  _lcOff[lcOffOriginMax] = RXLC_ORIGIN_MAX;
-  RXLC_HOST_FIELDS(LCSIM_OFF_)
-  lcSimRxCur = &rx;
-  lcSimTimes.assign(t.begin(), t.end());
-  _lcHost_getTime = &lcSimGetTime;
-  _lcHost_getRxSolve = &lcSimGetRxSolve;
-  ensureLinCmtA(1);
-  ensureLinCmtB(1);
-
-  rx_solve *prx = (rx_solve*)&rx;
-  auto call = [&](int i, int which1, int which2) {
-    double ka = theta(i, 6);
-    if (useB) {
-      return linCmtB(prx, 0, t[i], 0, ncmt, oral0, which1, which2, trans,
-                     theta(i, 0), theta(i, 1), theta(i, 2), theta(i, 3),
-                     theta(i, 4), theta(i, 5), ka);
-    }
-    return linCmtA(prx, 0, t[i], 0, ncmt, oral0, which1, trans,
-                   theta(i, 0), theta(i, 1), theta(i, 2), theta(i, 3),
-                   theta(i, 4), theta(i, 5), ka);
-  };
-
+  sim.neq = useB ? (m + ncmt*(2*ncmt + oral0) + oral0) : m;
+  sim.h.assign(linH.begin(), linH.end());
+  sim.fillRecords();
+  sim.setupStructs(sensType, ndiff, sensPhi, lagMask, originMask);
+  sim.bind();
   NumericVector val(n, NA_REAL), lhs(n, NA_REAL);
-  int nc = calls.nrow();
-  NumericMatrix callOut(n, nc);
-  auto applyDose = [&](int i, double *yp, bool rateOnly) {
-    if (doseCmt[i] < 0) return;
-    if (doseRate[i] != 0.0) {
-      infRate[doseCmt[i]] += doseRate[i];
-    } else if (!rateOnly) {
-      yp[doseCmt[i]] += doseAmt[i];
-    }
-  };
-  auto solvePass = [&]() {
-    std::fill(solve.begin(), solve.end(), 0.0);
-    std::fill(infRate.begin(), infRate.end(), 0.0);
-    double xp = t[0];
-    ind._rxFlag = 1;
-    ind.solvedIdx = 0;
-    for (int i = 0; i < n; i++) {
-      double *yp = solve.data() + (size_t)i*neq;
-      if (i > 0) std::copy(yp - neq, yp, yp);
-      ind.idx = i;
-      ind.linSS = 0;
-      ind.doSS = 0;
-      bool ssInf = false;
-      if (ss[i] != 0) {
-        // a steady-state record: rxode2 switches the record's infusion on
-        // first, then solves the steady state
-        ind.doSS = 1;
-        ind.linSS = ss[i];
-        ind.linSStau = ssTau[i];
-        ind.linSSvar = ssVar[i];
-        ind.linSSbolusCmt = ssCmt[i];
-        ssInf = doseCmt[i] >= 0 && doseRate[i] != 0.0;
-        if (ssInf) applyDose(i, yp, true);
-      }
-      if (t[i] != xp || ss[i] != 0) {
-        ind.linCmtAlast = yp;
-        ind.tprior = xp;
-        ind.tout = t[i];
-        if (hPar >= 0) {
-          ind.linCmtHparIndex = hPar;
-          ind.linCmtH = hStep;
-        }
-        val[i] = useB ? call(i, -1, -1) : call(i, -1, 0);
-        ind.linCmtHparIndex = -2;
-        ind.linCmtH = NA_REAL;
-        std::copy(save.begin(), save.begin() + nSave, yp);
-      }
-      if (!ssInf) applyDose(i, yp, false);
-      ind.doSS = 0;
-      ind.linSS = 0;
-      xp = t[i];
-      ind.solvedIdx = i;
-    }
-  };
+  NumericMatrix callOut(n, calls.nrow());
   if (useB && !linCmtSensIsAD(sensType)) {
     // rxode2's step-size setup starts with a base solve with linH zeroed,
     // which resets the kernel's theta scaling for the first subject
-    std::vector<double> hKeep = h;
-    std::fill(h.begin(), h.end(), 0.0);
-    solvePass();
-    h = hKeep;
-    linCmtFreeInd((rx_solving_options_ind*)&ind);
-    linCmtBindFree((rx_solving_options_ind*)&ind);
+    std::vector<double> hKeep = sim.h;
+    std::fill(sim.h.begin(), sim.h.end(), 0.0);
+    sim.solvePass(val);
+    sim.h = hKeep;
+    sim.freeInd();
   }
-  solvePass();
-  // output pass: rxode2 re-runs the model on every solved record
-  ind._rxFlag = 11;
-  for (int i = 0; i < n; i++) {
-    ind.idx = i;
-    lhs[i] = useB ? call(i, -1, -1) : call(i, -1, 0);
-    for (int k = 0; k < nc; k++) {
-      callOut(i, k) = useB ? call(i, calls(k, 0), calls(k, 1)) : call(i, calls(k, 0), 0);
-    }
-  }
-  NumericMatrix state(n, neq);
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < neq; j++) state(i, j) = solve[(size_t)i*neq + j];
-  }
-
-  linCmtFreeInd((rx_solving_options_ind*)&ind);
-  linCmtBindFree((rx_solving_options_ind*)&ind);
-  memcpy(_lcOff, saved, sizeof(saved));
-  _lcHost_getTime = savedGetTime;
-  _lcHost_getRxSolve = savedGetRx;
-  lcSimRxCur = NULL;
+  sim.solvePass(val);
+  sim.outputPass(calls, lhs, callOut);
+  NumericMatrix state = sim.state();
+  sim.unbind();
   return List::create(_["val"] = val, _["lhs"] = lhs, _["state"] = state,
                       _["calls"] = callOut);
 }

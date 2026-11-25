@@ -1,5 +1,5 @@
 # Builds and deploys the pkgdown site from main.  Pull requests build the site
-# (without deploying) in ci.yaml's full tier, on /cifull.
+# (without deploying) in ci.yaml's full tier, on a manual run.
 on:
   push:
     branches: [main, master]

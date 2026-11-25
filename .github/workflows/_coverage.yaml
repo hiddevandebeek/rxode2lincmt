@@ -51,9 +51,9 @@ jobs:
 
       - uses: codecov/codecov-action@v5
         with:
-          # A run on main must upload; a /cifull run on a PR only fails when a
+          # A run on main must upload; a pull request run only fails when a
           # token is available.
-          fail_ci_if_error: ${{ github.event_name != 'issue_comment' || secrets.CODECOV_TOKEN != '' }}
+          fail_ci_if_error: ${{ github.event_name == 'push' || secrets.CODECOV_TOKEN != '' }}
           files: ./cobertura.xml
           plugins: noop
           disable_search: true

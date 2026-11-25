@@ -1,18 +1,17 @@
 # rxode2lincmt CI, in two tiers.  The `gate` job decides which tier a run gets:
 #
-#   fast  every push to a pull request targeting main, and a "/ci" comment
-#         on a pull request.
+#   fast  every push to a pull request targeting main.
 #         air format check + CRAN-mirror check (ubuntu release) + every
 #         NOT_CRAN test file on ubuntu release.
-#   full  every push to main (a merge), a "/cifull" comment on a pull
-#         request, or a manual run.
+#   full  every push to main (a merge), or a manual run.  To run it on a
+#         pull request: gh workflow run ci.yaml -f tier=full -f pr=<number>
 #         Everything in fast, plus the CRAN-mirror check on windows, macOS,
 #         R-devel and oldrel, the NOT_CRAN tests on all three OSes, coverage
 #         (fails below 80%) and a pkgdown build (pkgdown.yaml on a push).
 #
-# Comments count only from OWNER/MEMBER/COLLABORATOR, on pull requests that
-# target main.  Stacked pull requests (based on another branch) and drafts
-# run nothing (a /ci or /cifull comment still runs on a draft).  A pull
+# There is no comment trigger (issue_comment runs pull request code with the
+# repository's token).  Stacked pull requests (based on another branch) and
+# drafts run nothing (a manual run with `pr` still runs on a draft).  A pull
 # request that changes only documentation (*.md other than NEWS.md, bench/)
 # runs nothing either.  Retargeting a stacked pull request to main runs the
 # fast tier through ci-retarget.yaml.
@@ -25,8 +24,6 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main, master]
-  issue_comment:
-    types: [created]
   workflow_dispatch:
     inputs:
       tier:
@@ -44,16 +41,12 @@ name: ci.yaml
 permissions: read-all
 
 # One run per pull request (or branch) and tier: a new push cancels the
-# superseded fast run but never a full run.  Comments get a group of their
-# own so they never cancel a pull request's run; comments that are not CI
-# commands get a group per run so they cancel nothing at all.
+# superseded fast run but never a full run.
 concurrency:
   group: >-
-    ci-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || github.ref }}-${{
-    (github.event_name == 'push' || inputs.tier == 'full' || startsWith(github.event.comment.body, '/cifull')) && 'full' || 'fast' }}${{
-    github.event_name == 'issue_comment' && '-comment' || '' }}${{
-    (github.event_name == 'issue_comment' && !(github.event.issue.pull_request && startsWith(github.event.comment.body, '/ci') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) && format('-noop-{0}', github.run_id) || '' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
+    ci-${{ github.event.pull_request.number || inputs.pr || github.ref }}-${{
+    (github.event_name == 'push' || inputs.tier == 'full') && 'full' || 'fast' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
@@ -76,13 +69,12 @@ jobs:
           script: |
             const ev = context.eventName;
             const p = context.payload;
-            const trusted = ['OWNER', 'MEMBER', 'COLLABORATOR'];
             const mainBranches = ['main', 'master'];
             let tier = 'none', ref = '', sha = '', pr = null;
 
             if (ev === 'pull_request') {
               if (p.pull_request.draft) {
-                core.notice('draft pull request: CI skipped (comment /ci to run it)');
+                core.notice('draft pull request: CI skipped (run ci.yaml by hand with `pr` to test it)');
               } else {
                 tier = 'fast';
                 pr = p.pull_request.number;
@@ -94,8 +86,8 @@ jobs:
               tier = (p.inputs && p.inputs.tier) || 'full';
               const n = parseInt((p.inputs && p.inputs.pr) || '', 10);
               if (!isNaN(n)) {
-                // a pull request run (ci-retarget.yaml): test its merge ref and
-                // report to its head commit, as a /ci comment does
+                // a pull request run (by hand or ci-retarget.yaml): test its merge ref and
+                // report to its head commit
                 const pull = (await github.rest.pulls.get({ ...context.repo, pull_number: n })).data;
                 if (pull.state === 'open' && mainBranches.includes(pull.base.ref)) {
                   pr = n;
@@ -105,23 +97,10 @@ jobs:
                   tier = 'none';
                 }
               }
-            } else if (ev === 'issue_comment') {
-              const body = (p.comment.body || '').trim();
-              // /cifull is tested first: "/cifull" also starts with "/ci"
-              const want = /^\/cifull(\s|$)/.test(body) ? 'full' : /^\/ci(\s|$)/.test(body) ? 'fast' : 'none';
-              if (want !== 'none' && p.issue.pull_request && trusted.includes(p.comment.author_association)) {
-                const pull = (await github.rest.pulls.get({ ...context.repo, pull_number: p.issue.number })).data;
-                if (mainBranches.includes(pull.base.ref)) {
-                  tier = want;
-                  pr = p.issue.number;
-                  ref = `refs/pull/${pr}/merge`;
-                  sha = pull.head.sha;
-                }
-              }
             }
 
-            // skip a pull request that changes only documentation (not for an
-            // explicit comment)
+            // skip a pull request that changes only documentation (not for a
+            // manual run)
             if (pr !== null && ev === 'pull_request') {
               const files = (await github.paginate(github.rest.pulls.listFiles,
                 { ...context.repo, pull_number: pr, per_page: 100 }))
@@ -148,7 +127,7 @@ jobs:
 
             if (sha !== '' && tier !== 'none') {
               await github.rest.repos.createCommitStatus({ ...context.repo, sha,
-                state: 'pending', context: `ci (${tier})`, description: `/ci${tier === 'full' ? 'full' : ''} run in progress`,
+                state: 'pending', context: `ci (${tier})`, description: `${tier} run in progress`,
                 target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
             }
             core.info(`event=${ev} tier=${tier} ref=${ref || '(event ref)'} pr=${pr}`);
@@ -212,8 +191,8 @@ jobs:
       ref: ${{ needs.gate.outputs.ref }}
 
   # The single required check: fails when any job above failed or was
-  # cancelled (a skipped job is fine), and reports a comment-started run back
-  # to the pull request's head commit.
+  # cancelled (a skipped job is fine), and reports a manual pull request run
+  # back to the pull request's head commit.
   result:
     needs: [gate, format, check, tests, coverage, pkgdown]
     if: ${{ !cancelled() }}

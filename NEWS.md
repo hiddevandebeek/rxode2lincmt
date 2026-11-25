@@ -53,6 +53,16 @@
   The generated model has to emit the sentinels; this is the runtime the
   estimator's code generation builds on (#19).
 
+- The second-order steps can be switched per thread: the C callable
+  `linCmtSetHessThread()` (registered for `R_GetCCallable()`, detected by the
+  internal `.linCmtHessThread()`) says, on the solving thread, whether the
+  model being solved reads them.  `rx->ndiff` is one field shared by every
+  model an estimator solves concurrently, so an estimator that keeps the
+  second-order bit on for all of them uses this to spare the models that
+  never read a Hessian.  The second-order history also starts over when a
+  subject is solved again, and a record at the initial state reads zero
+  rather than `NA`.
+
 - `linCmt()` FOCEi fits spend less time per row: the output pass that runs
   after each solved interval now takes the thin value path instead of
   restoring the full Jacobian, the AD path copies the requested parameters

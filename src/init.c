@@ -68,7 +68,10 @@ static const R_CallMethodDef callMethods[] = {
   {NULL, NULL, 0}
 };
 
+extern void linCmtSetHessThread(int on);
+
 void R_init_rxode2lincmt(DllInfo *info) {
   R_registerRoutines(info, NULL, callMethods, NULL, NULL);
+  R_RegisterCCallable("rxode2lincmt", "linCmtSetHessThread", (DL_FUNC) &linCmtSetHessThread);
   R_useDynamicSymbols(info, FALSE);
 }

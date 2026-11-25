@@ -3641,6 +3641,19 @@ static inline int linCmtSecondOrderUnsupported(rx_solving_options_ind *ind,
   return 0;
 }
 
+// Whether this thread's solve wants the second-order steps.  The model's
+// parse opts in (ndiff bit diffHess), but rx->ndiff is one field shared by
+// every model an estimator solves on the same rx_solve: a caller that solves
+// several models concurrently (nlmixr2est's inner and second-order models,
+// for different subjects on different threads) keeps the bit on for all of
+// them and says per solve, on the solving thread, whether this one reads the
+// Hessians: 1 yes, 0 no.  -1 (never set) follows ndiff alone.
+static thread_local int linCmtHessThread = -1;
+extern "C" void linCmtSetHessThread(int on) { linCmtHessThread = on; }
+static inline bool linCmtHessOn(rx_solve *rx) {
+  return (RXS(rx, ndiff) & diffHess) != 0 && linCmtHessThread != 0;
+}
+
 // The history slot of record idx (grown on demand).
 static inline double *linCmtBhessSlot(linCmtBind &wsp, int idx, int ncmt, int oral0) {
   int m = ncmt + oral0, n = 2*ncmt + oral0;
@@ -3679,7 +3692,7 @@ static inline int linCmtBhessFrom(linCmtBind &wsp, int idx) {
 // amount Hessians are zero.
 static inline void linCmtBhessRestore(rx_solve *rx, linCmtBind &wsp, int idx,
                                       int ncmt, int oral0) {
-  if ((RXS(rx, ndiff) & diffHess) == 0) return;
+  if (!linCmtHessOn(rx)) return;
   double *slot = linCmtBhessSlot(wsp, idx, ncmt, oral0);
   int from = linCmtBhessFrom(wsp, idx);
   if (from < 0) {
@@ -3700,7 +3713,7 @@ static inline void linCmtBhessStep(linB_t &lcb, linCmtBind &wsp, rx_solve *rx,
                                    rx_solving_options *op, int idx,
                                    int ncmt, int oral0, bool ad,
                                    Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1> > &theta) {
-  if ((RXS(rx, ndiff) & diffHess) == 0) return;
+  if (!linCmtHessOn(rx)) return;
   // A step at a record before the last one taken is a new solve of the
   // subject (an estimator re-solves the same subject at new etas: its
   // solver starts again from the first record).  The history belongs to

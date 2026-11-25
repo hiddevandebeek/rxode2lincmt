@@ -1,0 +1,296 @@
+# rxode2lincmt CI, in two tiers.  The `gate` job decides which tier a run gets:
+#
+#   fast  every push to a pull request targeting main, and a "/ci" comment
+#         on a pull request.
+#         air format check + CRAN-mirror check (ubuntu release) + every
+#         NOT_CRAN test file on ubuntu release.
+#   full  every push to main (a merge), a "/cifull" comment on a pull
+#         request, or a manual run.
+#         Everything in fast, plus the CRAN-mirror check on windows, macOS,
+#         R-devel and oldrel, the NOT_CRAN tests on all three OSes, coverage
+#         (fails below 80%) and a pkgdown build (pkgdown.yaml on a push).
+#
+# Comments count only from OWNER/MEMBER/COLLABORATOR, on pull requests that
+# target main.  Stacked pull requests (based on another branch) and drafts
+# run nothing (a /ci or /cifull comment still runs on a draft).  A pull
+# request that changes only documentation (*.md other than NEWS.md, bench/)
+# runs nothing either.  Retargeting a stacked pull request to main runs the
+# fast tier through ci-retarget.yaml.
+# The `result` job is the one check to require in branch protection.
+# A failing run on main opens (or comments on) a `ci-main-failure` issue; the
+# next green run on main closes it (`main-alert`).
+on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main, master]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: CI tier to run
+        type: choice
+        options: [fast, full]
+        default: full
+      pr:
+        description: pull request number to test (its merge ref); empty = this branch
+        type: string
+        default: ''
+
+name: ci.yaml
+
+permissions: read-all
+
+# One run per pull request (or branch) and tier: a new push cancels the
+# superseded fast run but never a full run.  Comments get a group of their
+# own so they never cancel a pull request's run; comments that are not CI
+# commands get a group per run so they cancel nothing at all.
+concurrency:
+  group: >-
+    ci-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || github.ref }}-${{
+    (github.event_name == 'push' || inputs.tier == 'full' || startsWith(github.event.comment.body, '/cifull')) && 'full' || 'fast' }}${{
+    github.event_name == 'issue_comment' && '-comment' || '' }}${{
+    (github.event_name == 'issue_comment' && !(github.event.issue.pull_request && startsWith(github.event.comment.body, '/ci') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) && format('-noop-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      tier: ${{ steps.gate.outputs.tier }}
+      ref: ${{ steps.gate.outputs.ref }}
+      sha: ${{ steps.gate.outputs.sha }}
+      check-matrix: ${{ steps.gate.outputs.check-matrix }}
+      test-matrix: ${{ steps.gate.outputs.test-matrix }}
+    steps:
+      - id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ev = context.eventName;
+            const p = context.payload;
+            const trusted = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const mainBranches = ['main', 'master'];
+            let tier = 'none', ref = '', sha = '', pr = null;
+
+            if (ev === 'pull_request') {
+              if (p.pull_request.draft) {
+                core.notice('draft pull request: CI skipped (comment /ci to run it)');
+              } else {
+                tier = 'fast';
+                pr = p.pull_request.number;
+              }
+            } else if (ev === 'push') {
+              // a merge to main
+              tier = 'full';
+            } else if (ev === 'workflow_dispatch') {
+              tier = (p.inputs && p.inputs.tier) || 'full';
+              const n = parseInt((p.inputs && p.inputs.pr) || '', 10);
+              if (!isNaN(n)) {
+                // a pull request run (ci-retarget.yaml): test its merge ref and
+                // report to its head commit, as a /ci comment does
+                const pull = (await github.rest.pulls.get({ ...context.repo, pull_number: n })).data;
+                if (pull.state === 'open' && mainBranches.includes(pull.base.ref)) {
+                  pr = n;
+                  ref = `refs/pull/${n}/merge`;
+                  sha = pull.head.sha;
+                } else {
+                  tier = 'none';
+                }
+              }
+            } else if (ev === 'issue_comment') {
+              const body = (p.comment.body || '').trim();
+              // /cifull is tested first: "/cifull" also starts with "/ci"
+              const want = /^\/cifull(\s|$)/.test(body) ? 'full' : /^\/ci(\s|$)/.test(body) ? 'fast' : 'none';
+              if (want !== 'none' && p.issue.pull_request && trusted.includes(p.comment.author_association)) {
+                const pull = (await github.rest.pulls.get({ ...context.repo, pull_number: p.issue.number })).data;
+                if (mainBranches.includes(pull.base.ref)) {
+                  tier = want;
+                  pr = p.issue.number;
+                  ref = `refs/pull/${pr}/merge`;
+                  sha = pull.head.sha;
+                }
+              }
+            }
+
+            // skip a pull request that changes only documentation (not for an
+            // explicit comment)
+            if (pr !== null && ev === 'pull_request') {
+              const files = (await github.paginate(github.rest.pulls.listFiles,
+                { ...context.repo, pull_number: pr, per_page: 100 }))
+                .filter(f => f.status !== 'removed').map(f => f.filename);
+              const docOnly = f => (/\.md$/i.test(f) && f !== 'NEWS.md') || f.startsWith('bench/');
+              if (files.length > 0 && files.every(docOnly)) {
+                core.notice('documentation-only change: CI skipped');
+                tier = 'none';
+              }
+            }
+
+            const rel = os => ({ os, r: 'release' });
+            let checkMatrix = [rel('ubuntu-latest')];
+            let testMatrix = [rel('ubuntu-latest')];
+            if (tier === 'full') {
+              checkMatrix = checkMatrix.concat([
+                rel('windows-latest'),
+                rel('macos-latest'),
+                { os: 'ubuntu-latest', r: 'devel', 'http-user-agent': 'release' },
+                { os: 'ubuntu-latest', r: 'oldrel-1' },
+              ]);
+              testMatrix = testMatrix.concat([rel('windows-latest'), rel('macos-latest')]);
+            }
+
+            if (sha !== '' && tier !== 'none') {
+              await github.rest.repos.createCommitStatus({ ...context.repo, sha,
+                state: 'pending', context: `ci (${tier})`, description: `/ci${tier === 'full' ? 'full' : ''} run in progress`,
+                target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
+            }
+            core.info(`event=${ev} tier=${tier} ref=${ref || '(event ref)'} pr=${pr}`);
+            core.setOutput('tier', tier);
+            core.setOutput('ref', ref);
+            core.setOutput('sha', sha);
+            core.setOutput('check-matrix', JSON.stringify(checkMatrix));
+            core.setOutput('test-matrix', JSON.stringify(testMatrix));
+
+  # R code formatted with air (https://posit-dev.github.io/air/), using
+  # air.toml.  To fix a failure locally run `air format .`.
+  format:
+    needs: gate
+    if: needs.gate.outputs.tier != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.gate.outputs.ref }}
+
+      - name: Check R code is formatted with air
+        uses: rstudio/shiny-workflows/format-r-code@v1
+        with:
+          # Pinned so CI and local `air format` agree; bump deliberately and
+          # reformat in the same PR.
+          version: 0.12.0
+          check: "true"
+
+  check:
+    needs: gate
+    if: needs.gate.outputs.tier != 'none'
+    uses: ./.github/workflows/_check.yaml
+    with:
+      ref: ${{ needs.gate.outputs.ref }}
+      matrix: ${{ needs.gate.outputs.check-matrix }}
+
+  tests:
+    needs: gate
+    if: needs.gate.outputs.tier != 'none'
+    uses: ./.github/workflows/_tests.yaml
+    with:
+      ref: ${{ needs.gate.outputs.ref }}
+      matrix: ${{ needs.gate.outputs.test-matrix }}
+
+  coverage:
+    needs: gate
+    if: needs.gate.outputs.tier == 'full'
+    uses: ./.github/workflows/_coverage.yaml
+    with:
+      ref: ${{ needs.gate.outputs.ref }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # a push to main builds and deploys the site in pkgdown.yaml instead
+  pkgdown:
+    needs: gate
+    if: needs.gate.outputs.tier == 'full' && github.event_name != 'push'
+    uses: ./.github/workflows/_pkgdown.yaml
+    with:
+      ref: ${{ needs.gate.outputs.ref }}
+
+  # The single required check: fails when any job above failed or was
+  # cancelled (a skipped job is fine), and reports a comment-started run back
+  # to the pull request's head commit.
+  result:
+    needs: [gate, format, check, tests, coverage, pkgdown]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          TIER: ${{ needs.gate.outputs.tier }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const bad = Object.entries(needs).filter(([, v]) => v.result === 'failure' || v.result === 'cancelled');
+            for (const [k, v] of Object.entries(needs)) core.info(`${k}: ${v.result}`);
+            const ok = bad.length === 0;
+            if (process.env.SHA !== '' && process.env.TIER !== 'none') {
+              await github.rest.repos.createCommitStatus({ ...context.repo, sha: process.env.SHA,
+                state: ok ? 'success' : 'failure', context: `ci (${process.env.TIER})`,
+                description: ok ? 'passed' : `failed: ${bad.map(([k]) => k).join(', ')}`,
+                target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
+            }
+            if (!ok) core.setFailed(`failed jobs: ${bad.map(([k]) => k).join(', ')}`);
+
+  # A failure on main opens an issue so it is not lost behind later merges.
+  # Later failures comment on it; the next green run on main closes it.
+  # Optional repo variable CI_FAILURE_ASSIGNEES (comma-separated logins)
+  # assigns it.
+  main-alert:
+    needs: [gate, format, check, tests, coverage, pkgdown]
+    if: >-
+      !cancelled() && needs.gate.outputs.tier != 'none' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pr == ''))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          ASSIGNEES: ${{ vars.CI_FAILURE_ASSIGNEES }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const bad = Object.entries(needs).filter(([, v]) => v.result === 'failure' || v.result === 'cancelled');
+            const label = 'ci-main-failure';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = context.sha;
+            const open = (await github.rest.issues.listForRepo({ ...context.repo, labels: label, state: 'open', per_page: 1 })).data[0];
+
+            if (bad.length === 0) {
+              if (open) {
+                await github.rest.issues.createComment({ ...context.repo, issue_number: open.number,
+                  body: `CI passes again on ${sha.slice(0, 9)}: ${runUrl}` });
+                await github.rest.issues.update({ ...context.repo, issue_number: open.number, state: 'closed' });
+              }
+              return;
+            }
+
+            const body = `CI failed on \`${context.ref.replace('refs/heads/', '')}\` at ${sha.slice(0, 9)} (${context.eventName}).\n\n` +
+              `Run: ${runUrl}\n\nFailed jobs:\n${bad.map(([k]) => `- ${k}`).join('\n')}`;
+            if (open) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: open.number, body });
+            } else {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name: label });
+              } catch (e) {
+                await github.rest.issues.createLabel({ ...context.repo, name: label, color: 'd73a4a',
+                  description: 'CI failing on main' });
+              }
+              const assignees = (process.env.ASSIGNEES || '').split(',').map(s => s.trim()).filter(Boolean);
+              await github.rest.issues.create({ ...context.repo, title: 'CI failing on main',
+                body, labels: [label], assignees });
+            }

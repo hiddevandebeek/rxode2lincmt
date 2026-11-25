@@ -1,0 +1,82 @@
+# Shared setup for every CI job that compiles rxode2lincmt: R, the dependency
+# library (cached), and ccache in front of the C/C++ compilers (the Stan
+# build dominates every job).
+name: setup-lincmt
+description: Set up R, rxode2lincmt's dependencies and ccache
+
+inputs:
+  r-version:
+    description: R version passed to r-lib/actions/setup-r
+    default: release
+  http-user-agent:
+    description: passed to r-lib/actions/setup-r
+    default: ''
+  extra-packages:
+    description: packages added to the package's dependencies
+    default: ''
+  needs:
+    description: Config/Needs field used by setup-r-dependencies
+    default: ''
+  cache-version:
+    description: bump to invalidate the dependency library cache
+    default: '1'
+  pandoc:
+    description: install pandoc (needed for pkgdown)
+    default: 'false'
+  ccache:
+    description: put ccache in front of the compilers
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.pandoc == 'true'
+      uses: r-lib/actions/setup-pandoc@v2
+
+    - uses: r-lib/actions/setup-r@v2
+      with:
+        r-version: ${{ inputs.r-version }}
+        http-user-agent: ${{ inputs.http-user-agent }}
+        use-public-rspm: true
+
+    - uses: r-lib/actions/setup-r-dependencies@v2
+      with:
+        cache-version: ${{ inputs.cache-version }}
+        extra-packages: ${{ inputs.extra-packages }}
+        needs: ${{ inputs.needs }}
+
+    # ccache is set up AFTER the dependencies so it only caches this package's
+    # objects, keeping the cache small.
+    - name: Set up ccache
+      if: inputs.ccache == 'true'
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ runner.os }}-${{ inputs.r-version }}-${{ github.job }}
+        max-size: 500M
+
+    # A dedicated Makevars through R_MAKEVARS_USER that wraps only the compiler
+    # commands; the flags inst/tools/workaround.R probes are unchanged
+    # (`ccache gcc --version` still reports gcc).
+    - name: Route the compilers through ccache
+      if: inputs.ccache == 'true'
+      shell: bash
+      run: |
+        if ! ccache --version > /dev/null 2>&1; then
+          echo "::warning::ccache is not on the PATH; compiling without it"
+          exit 0
+        fi
+        tmp="$RUNNER_TEMP"
+        # R on Windows wants a C:/... path, not the bash or backslash form
+        if [ "$RUNNER_OS" = "Windows" ]; then tmp=$(cygpath -m "$RUNNER_TEMP"); fi
+        mv="$tmp/Makevars.ccache"
+        : > "$mv"
+        for v in CC CXX CXX11 CXX14 CXX17 CXX20; do
+          c=$(R CMD config "$v" 2>/dev/null || true)
+          if [ -n "$c" ] && ! echo "$c" | grep -q "not defined"; then
+            echo "$v=ccache $c" >> "$mv"
+          fi
+        done
+        cat "$mv"
+        echo "R_MAKEVARS_USER=$mv" >> "$GITHUB_ENV"
+        echo "CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime,time_macros" >> "$GITHUB_ENV"
+        echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"

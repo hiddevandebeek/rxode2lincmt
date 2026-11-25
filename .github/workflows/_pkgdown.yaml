@@ -1,0 +1,47 @@
+# Build the pkgdown site and upload it as the "pkgdown-site" artifact.
+# Called by ci.yaml (full tier, build only) and pkgdown.yaml (build + deploy).
+name: _pkgdown.yaml
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: git ref to check out ('' = the triggering ref)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  pkgdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-lincmt
+        with:
+          pandoc: 'true'
+          extra-packages: |
+            any::pkgdown
+            local::.
+          needs: website
+
+      # pkgdown renders every top-level .md; keep agent instruction files off the site
+      - name: Remove agent instruction files
+        run: rm -f CLAUDE.md AGENTS.md .github/copilot-instructions.md
+
+      - name: Build site
+        run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE)
+        shell: Rscript {0}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkgdown-site
+          path: docs
+          retention-days: 3

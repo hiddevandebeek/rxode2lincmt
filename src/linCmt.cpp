@@ -3280,6 +3280,53 @@ static inline bool linCmtBread(linB_t &lcb, int which1, int which2, double *out)
   return false;
 }
 
+// The decomposition at a record the solve never advanced: one at the same
+// time as the record before it (an observation at a dose time) or a
+// subject's first record.  It has no cache slot of its own, so its reads were
+// NA -- and an estimator that reads the -10 bioavailability sensitivity at
+// every observation failed the whole subject on one such row.  Its amounts
+// are the last advanced record's carried forward plus the doses given at
+// this time, so its decomposition is that record's cached one plus exactly
+// the attribution the next advance would make (linCmtOriginStep()): the
+// difference between the amounts here and the rows' sum, which a bolus only
+// puts in its own compartment.  With nothing attributed yet (no slot, or the
+// empty one a first record caches) the initial conditions are not a dose,
+// as on the first advance.  Writes the decomposition to O (RX_LINCMT_ORIGIN_MAX
+// squared) and *fromIdx the record it builds on (-1: none); returns the
+// seeded state (2: poisoned, so NA).
+static inline int linCmtOriginUnsolved(rx_solving_options_ind *ind, rx_solving_options *op,
+                                       int idx, int m, double *O, int *fromIdx) {
+  const int st = RX_LINCMT_ORIGIN_MAX;
+  const int w = RX_LINCMT_ORIGIN_SLOTW(m);
+  const double *slot = NULL;
+  *fromIdx = -1;
+  for (int i = idx; i >= 0; --i) {
+    const double *s = linCmtOriginSlot(ind, i, w, 0);
+    if (s != NULL && s[m*st] != 0.0) {
+      slot = s;
+      *fromIdx = i;
+      break;
+    }
+  }
+  if (slot != NULL && slot[m*st] == 2.0) return 2;
+  std::fill(O, O + st*st, 0.0);
+  bool empty = true;
+  if (slot != NULL) {
+    for (int k = 0; k < m*st; ++k) {
+      O[k] = slot[k];
+      if (O[k] != 0.0) empty = false;
+    }
+  }
+  const double *A = getAdvan(idx);
+  for (int j = 0; j < m; ++j) {
+    double sum = 0.0;
+    for (int q = 0; q < m; ++q) sum += O[q*st + j];
+    double base = (empty && OPT(op, inits) != NULL) ? OPT(op, inits)[OPT(op, linOffset) + j] : 0.0;
+    O[j*st + j] += A[j] - sum - base;
+  }
+  return 1;
+}
+
 // which1 = -9/-10 dispatch: find this row's decomposition and rate, then read
 // it.  Same re-query rule as which1 = -3 -- an already-solved idx reads the
 // per-idx caches, since both the live rate and the live decomposition have
@@ -3302,6 +3349,13 @@ static inline double linCmtBoriginQuery(linB_t &lcb, rx_solving_options_ind *ind
   int seeded = IND(ind, linCmtOriginOutSeeded);
   if (reQuery) {
     seeded = (origin == NULL) ? 0 : (int)origin[mOrig*RX_LINCMT_ORIGIN_MAX];
+  }
+  double unsolved[RX_LINCMT_ORIGIN_MAX*RX_LINCMT_ORIGIN_MAX];
+  if (reQuery && seeded == 0 && mOrig > 0 && mOrig <= RX_LINCMT_ORIGIN_MAX) {
+    int from = -1;
+    seeded = linCmtOriginUnsolved(ind, op, idx, mOrig, unsolved, &from);
+    origin = unsolved;
+    if (from >= 0) rate = linCmtBRateSlot(ind, from, OPT(op, numLin), 0);
   }
   return linCmtBorigin(lcb.lc, ind, op, origin, seeded, rate, ncmt, oral0,
                        which1, which2, trans, p1, v1, p2, p3, p4, p5, ka);

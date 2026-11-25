@@ -254,3 +254,11 @@ test_that("an H-perturbed evaluation shifts the parameter by the step", {
   expect_true(any(.ok))
   expect_true(all(is.finite(.h$val[.ok])))
 })
+
+test_that("the harness rejects inconsistent records", {
+  .ev <- .hsEv(0L)
+  expect_error(.hsRun(.ev, matrix(1, 2, 7), 1L, 0L), "inconsistent inputs")
+  expect_error(.hsRun(.ev, .hsPar(1L, 0L), 4L, 0L), "inconsistent inputs")
+  .ev$cmt[1] <- 3L
+  expect_error(.hsRun(.ev, .hsPar(1L, 0L), 1L, 0L), "out of range at record 1")
+})

@@ -278,12 +278,15 @@ static void lcSimCheck(int n, int m, int ncmt, int oral0, IntegerVector doseCmt,
                        NumericMatrix theta, IntegerMatrix calls, NumericVector linH,
                        IntegerVector ss, NumericVector ssTau, NumericVector ssVar,
                        IntegerVector ssCmt) {
-  bool lens = doseCmt.size() == n && doseAmt.size() == n && doseRate.size() == n &&
-    ss.size() == n && ssTau.size() == n && ssVar.size() == n && ssCmt.size() == n;
-  if (n < 1 || ncmt < 1 || ncmt > 3 || oral0 < 0 || oral0 > 1 || !lens ||
-      theta.nrow() != n || theta.ncol() != 7 || calls.ncol() != 2 || linH.size() != 7) {
-    Rcpp::stop("linCmtHostSim: inconsistent inputs");
+  // every per-record input has one entry per record
+  const R_xlen_t lens[] = {doseCmt.size(), doseAmt.size(), doseRate.size(), ss.size(),
+                           ssTau.size(), ssVar.size(), ssCmt.size(), theta.nrow()};
+  for (R_xlen_t len : lens) {
+    if (len != n) Rcpp::stop("linCmtHostSim: inconsistent inputs");
   }
+  bool shape = n >= 1 && ncmt >= 1 && ncmt <= 3 && (oral0 == 0 || oral0 == 1);
+  bool dims = theta.ncol() == 7 && calls.ncol() == 2 && linH.size() == 7;
+  if (!shape || !dims) Rcpp::stop("linCmtHostSim: inconsistent inputs");
   for (int i = 0; i < n; i++) {
     if (doseCmt[i] >= m || ss[i] < 0 || ss[i] > 3) {
       Rcpp::stop("linCmtHostSim: dose or steady state out of range at record %d", i + 1);

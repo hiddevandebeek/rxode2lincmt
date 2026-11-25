@@ -9,6 +9,18 @@
   then.  With an rxode2 that does not send them the carry stays in the fixed
   8-pair array, as before.
 
+## Bug fixes
+
+- The per-compartment dose-time and bioavailability sensitivities
+  (`linCmtB()` `which1 = -9` and `-10`) are no longer `NA` at a record the
+  solve does not advance: one at the same time as the record before it, such
+  as an observation at a dose time.  Such a record had no decomposition of
+  its own; it now takes the last advanced record's, plus the doses given at
+  that time.  nlmixr2est's FOCEi reads the `-10` sensitivity at every
+  observation, so a `linCmt()` model with an eta on `f()` failed every
+  subject that had a sample at a dose time, and its fit returned a constant
+  objective.
+
 # rxode2lincmt 0.1.1
 
 ## New features

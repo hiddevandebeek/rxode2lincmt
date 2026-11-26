@@ -2915,7 +2915,7 @@ namespace stan {
                 thetaCur(i, 0) += hhh;
                 fnext2          = fdoubles(thetaCur);
                 fcur = (-11.0*fx + 18*fup -
-                        9.0*fnext + 6.0*fnext2).array()/(6.0*hhh)*scaleC_(i, 0);
+                        9.0*fnext + 2.0*fnext2).array()/(6.0*hhh)*scaleC_(i, 0);
                 Js.col(i) = fcur;
               } else {
                 Js.col(i)       =  fcur;

@@ -1632,20 +1632,26 @@ static inline NumericVector linCmtModelDoubleAlast(const double *asave, int nAla
 
 // Jacobian for linCmtModelDouble(); false for a sensType it does not
 // support.  The AD methods (3/30 forward fvar, 32 multi-direction fvar,
-// 31 reverse) need no
-// step; 10/20 use sensH, 1/2 the kernel's own step choice.
+// 31 reverse) need no step.  The finite differences use sensH: 1/10
+// forward, 2/20 central (rxode2 estimates the 1/2 step per subject, which a
+// single kernel call cannot).  Like linCmtBfdJac(), they need the base value
+// from calcFx() first.
 static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType,
                                         double sensH,
                                         Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1>> &thetaSens,
                                         Eigen::Matrix<double, Eigen::Dynamic, 1> &fx,
                                         Eigen::Matrix<double, -1, -1> &Js) {
   Eigen::Matrix<double, Eigen::Dynamic, 1> h =
-    Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(thetaSens.size());
+    Eigen::Matrix<double, Eigen::Dynamic, 1>::Constant(thetaSens.size(), sensH);
   switch (sensType) {
-  case 1: // forward
+  case 1:
+  case 10: // forward
+    lc.calcFx(thetaSens);
     lc.fForwardJac(thetaSens, h.data(), fx, Js);
     return true;
-  case 2:  // central
+  case 2:
+  case 20: // central
+    lc.calcFx(thetaSens);
     lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   case 31: // reverse-mode AD
@@ -1658,14 +1664,6 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
     return true;
   case 32:  // "ADm": all directions in one forward-mode pass; bitwise as 3
     lc.linCmtDualJac(thetaSens, fx, Js);
-    return true;
-  case 10:
-    h.setConstant(sensH);
-    lc.fForwardJac(thetaSens, h.data(), fx, Js);
-    return true;
-  case 20:
-    h.setConstant(sensH);
-    lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   default:
     return false;
@@ -1700,10 +1698,9 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
 //'   `v1` 4, `p2` 8, `p3` 16, `p4` 32, `p5` 64)
 //' @param sensType derivative method: 3 or 30 forward-mode automatic
 //'   differentiation, 32 all directions in one forward-mode pass, 31
-//'   reverse mode, 100 automatic choice, 1 and 2 forward and central
-//'   differences with the kernel's own step, 10 and 20 forward and central
-//'   differences with step `sensH`
-//' @param sensH finite-difference step for `sensType` 10 and 20
+//'   reverse mode, 100 automatic choice, 1 or 10 forward and 2 or 20
+//'   central differences with step `sensH`
+//' @param sensH finite-difference step for `sensType` 1, 2, 10 and 20
 //' @return list with `val` (central concentration) and `Alast` (carried
 //'   state after the step); with `deriv = TRUE` also `J` (Jacobian of the
 //'   amounts) and `Jg` (gradient of `val`)

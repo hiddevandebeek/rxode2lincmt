@@ -11,3 +11,5 @@ config.log
 config.status
 .cache/
 docs/
+src/*.gcno
+src/*.gcda

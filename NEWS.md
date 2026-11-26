@@ -20,6 +20,20 @@
   observation, so a `linCmt()` model with an eta on `f()` failed every
   subject that had a sample at a dose time, and its fit returned a constant
   objective.
+- Internal test hook `.linCmtHostSim()` solves a synthetic subject through
+  `linCmtA()`/`linCmtB()` on stand-in solver structs, so the solver paths are
+  tested without rxode2.
+
+## Bug fixes
+
+- `linCmtModelDouble()` no longer crashes R with the finite-difference
+  `sensType` values 1, 2, 10 and 20: it now computes the base value first, as
+  `linCmtB()` does, and all four use the step `sensH`.
+
+- The four-point forward difference that `linCmt()` finite-difference
+  gradients fall back to with `linCmtForwardMax = 3` used the coefficient 6
+  instead of 2 on its last point, so a suspect gradient came out wrong.  The
+  default (`linCmtForwardMax = 2`) is unchanged.
 
 # rxode2lincmt 0.1.1
 
@@ -37,6 +51,10 @@
 
 - `linCmt()` value-only solves no longer allocate on each computed row.
   Results are bitwise unchanged (#9).
+
+- `linCmt()` value-only solves compute the micro-constants and the 2- and
+  3-compartment eigen-decomposition once per parameter set instead of on
+  every row.  Results are bitwise unchanged (#9).
 
 ## Bug fixes
 

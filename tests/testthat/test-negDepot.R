@@ -2,9 +2,30 @@
 # the depot output unassigned: garbage under forward mode, a segfault under
 # reverse mode (rxode2 #1275).
 .callDepot <- function(alast, sensType, ka = 1.1) {
-  linCmtModelDouble(0.7, 1.0, 20, 2.0, 40, 0.5, 60, ka,
-                    alast, rep(0, 4), 3L, 1L, 1L, TRUE,
-                    0L, 0, 0, 0, 0L, 0L, as.integer(sensType), 0.001)
+  linCmtModelDouble(
+    0.7,
+    1.0,
+    20,
+    2.0,
+    40,
+    0.5,
+    60,
+    ka,
+    alast,
+    rep(0, 4),
+    3L,
+    1L,
+    1L,
+    TRUE,
+    0L,
+    0,
+    0,
+    0,
+    0L,
+    0L,
+    as.integer(sensType),
+    0.001
+  )
 }
 
 .depot <- function(v) {
@@ -22,7 +43,8 @@ for (.st in c(3L, 30L)) {
     expect_true(all(is.finite(.neg$J)))
     .h <- 1e-6
     .fd <- (.callDepot(.depot(-1e-6), .st, ka = 1.1 + .h)$val -
-              .callDepot(.depot(-1e-6), .st, ka = 1.1 - .h)$val) / (2 * .h)
+      .callDepot(.depot(-1e-6), .st, ka = 1.1 - .h)$val) /
+      (2 * .h)
     expect_equal(.neg$Jg[7], .fd, tolerance = 1e-6)
   })
 }

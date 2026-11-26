@@ -1632,20 +1632,26 @@ static inline NumericVector linCmtModelDoubleAlast(const double *asave, int nAla
 
 // Jacobian for linCmtModelDouble(); false for a sensType it does not
 // support.  The AD methods (3/30 forward fvar, 32 multi-direction fvar,
-// 31 reverse) need no
-// step; 10/20 use sensH, 1/2 the kernel's own step choice.
+// 31 reverse) need no step.  The finite differences use sensH: 1/10
+// forward, 2/20 central (rxode2 estimates the 1/2 step per subject, which a
+// single kernel call cannot).  Like linCmtBfdJac(), they need the base value
+// from calcFx() first.
 static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType,
                                         double sensH,
                                         Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1>> &thetaSens,
                                         Eigen::Matrix<double, Eigen::Dynamic, 1> &fx,
                                         Eigen::Matrix<double, -1, -1> &Js) {
   Eigen::Matrix<double, Eigen::Dynamic, 1> h =
-    Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(thetaSens.size());
+    Eigen::Matrix<double, Eigen::Dynamic, 1>::Constant(thetaSens.size(), sensH);
   switch (sensType) {
-  case 1: // forward
+  case 1:
+  case 10: // forward
+    lc.calcFx(thetaSens);
     lc.fForwardJac(thetaSens, h.data(), fx, Js);
     return true;
-  case 2:  // central
+  case 2:
+  case 20: // central
+    lc.calcFx(thetaSens);
     lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   case 31: // reverse-mode AD
@@ -1658,14 +1664,6 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
     return true;
   case 32:  // "ADm": all directions in one forward-mode pass; bitwise as 3
     lc.linCmtDualJac(thetaSens, fx, Js);
-    return true;
-  case 10:
-    h.setConstant(sensH);
-    lc.fForwardJac(thetaSens, h.data(), fx, Js);
-    return true;
-  case 20:
-    h.setConstant(sensH);
-    lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   default:
     return false;
@@ -1700,10 +1698,9 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
 //'   `v1` 4, `p2` 8, `p3` 16, `p4` 32, `p5` 64)
 //' @param sensType derivative method: 3 or 30 forward-mode automatic
 //'   differentiation, 32 all directions in one forward-mode pass, 31
-//'   reverse mode, 100 automatic choice, 1 and 2 forward and central
-//'   differences with the kernel's own step, 10 and 20 forward and central
-//'   differences with step `sensH`
-//' @param sensH finite-difference step for `sensType` 10 and 20
+//'   reverse mode, 100 automatic choice, 1 or 10 forward and 2 or 20
+//'   central differences with step `sensH`
+//' @param sensH finite-difference step for `sensType` 1, 2, 10 and 20
 //' @return list with `val` (central concentration) and `Alast` (carried
 //'   state after the step); with `deriv = TRUE` also `J` (Jacobian of the
 //'   amounts) and `Jg` (gradient of `val`)
@@ -1805,6 +1802,62 @@ RObject linCmtModelDouble(double dt,
   delete[] r;
   delete[] asave;
   return retList;
+}
+
+//' Value-path constant cache against the uncached kernel (test hook)
+//'
+//' Steps one kernel object through the rows of `par` with the theta-keyed
+//' constant cache linCmtA() uses, and another through the uncached
+//' evaluation, both from `alast0` with infusion `rate`.
+//'
+//' @param dt row time steps
+//' @param par numeric matrix, one row of (p1, v1, p2, p3, p4, p5, ka) per
+//'   step
+//' @param ncmt number of compartments
+//' @param oral0 1 for a depot, else 0
+//' @param trans parameterization code
+//' @param alast0 starting amounts
+//' @param rate infusion rates
+//' @return list with `cached` and `direct`, the amounts after each step
+//'   (one row per step)
+//' @keywords internal
+//' @export
+// [[Rcpp::export(.linCmtValueCacheCheck)]]
+List linCmtValueCacheCheck(NumericVector dt, NumericMatrix par,
+                           int ncmt, int oral0, int trans,
+                           NumericVector alast0, NumericVector rate) {
+  int m = ncmt + oral0;
+  if (alast0.size() != m) Rcpp::stop("alast0 size needs to be %d", m);
+  if (par.ncol() != 7 || par.nrow() != dt.size()) {
+    Rcpp::stop("par needs 7 columns and one row per dt");
+  }
+  stan::math::linCmtStan lcC(ncmt, oral0, trans, false, linCmtNormal, 0);
+  stan::math::linCmtStan lcD(ncmt, oral0, trans, false, linCmtNormal, 0);
+  int nRate = lcC.getNrate();
+  if (rate.size() != nRate) Rcpp::stop("rate size needs to be %d", nRate);
+  std::vector<double> aC(alast0.begin(), alast0.end()), aD = aC, sC(m), sD(m);
+  std::vector<double> r(rate.begin(), rate.end());
+  lcC.setPtr(aC.data(), r.data(), sC.data());
+  lcD.setPtr(aD.data(), r.data(), sD.data());
+  Eigen::Matrix<double, Eigen::Dynamic, 1> theta(lcC.getNpars()), fx;
+  Eigen::Matrix<double, Eigen::Dynamic, 1> yp(m);
+  Eigen::Matrix<double, Eigen::Dynamic, 2> g(ncmt, 2);
+  NumericMatrix outC(dt.size(), m), outD(dt.size(), m);
+  for (int i = 0; i < dt.size(); i++) {
+    linCmtFillTheta(theta, ncmt, oral0, par(i, 0), par(i, 1), par(i, 2),
+                    par(i, 3), par(i, 4), par(i, 5), par(i, 6));
+    lcC.setDt(dt[i]);
+    lcC.linAcalcAlastVal(theta);
+    lcC.evalValTo(theta, fx);
+    lcD.setDt(dt[i]);
+    lcD.linAcalcAlast(yp, g, theta);
+    Eigen::Matrix<double, Eigen::Dynamic, 1> fxD = lcD(theta);
+    for (int j = 0; j < m; j++) {
+      outC(i, j) = aC[j] = sC[j];
+      outD(i, j) = aD[j] = fxD(j, 0);
+    }
+  }
+  return List::create(_["cached"] = outC, _["direct"] = outD);
 }
 
 // Phase 3b.4 runtime fast-path state for the which1=-5 carry advance (see
@@ -2180,9 +2233,8 @@ static LINCMT_NOINLINE double linCmtAbody(linA_t &lca, rx_solve *rx,
       }
       lc.setDt(dt);
 
-      lc.linAcalcAlast(yp, lca.gg, theta);
-
-      lc.evalTo(theta, fx);
+      lc.linAcalcAlastVal(theta);
+      lc.evalValTo(theta, fx);
     }
     return lc.adjustF(fx, theta, IND(ind, linCmtHV));
   } else if (which >= 0 && which < nAlast) {

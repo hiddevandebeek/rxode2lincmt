@@ -3332,6 +3332,64 @@ static inline bool linCmtBread(linB_t &lcb, int which1, int which2, double *out)
   return false;
 }
 
+// The first record from `i` stepping by `step` (-1 or 1, stopping before
+// `end`) with a cached decomposition, or -1.  Past the cache's end (a NULL
+// slot) nothing later is cached; earlier records may be.
+static inline int linCmtOriginCached(rx_solving_options_ind *ind, int i, int step,
+                                     int end, int w, int flag) {
+  for (; i != end; i += step) {
+    const double *s = linCmtOriginSlot(ind, i, w, 0);
+    if (s == NULL) {
+      if (step > 0) return -1;
+    } else if (s[flag] != 0.0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The decomposition at a record the solve never advanced: one at the same
+// time as the record before it (an observation at a dose time) or a
+// subject's first record.  It has no cache slot of its own, so its reads were
+// NA -- and an estimator that reads the -10 bioavailability sensitivity at
+// every observation failed the whole subject on one such row.  Its amounts
+// are the last advanced record's carried forward plus the doses given at
+// this time, so its decomposition is that record's cached one plus exactly
+// the attribution the next advance would make (linCmtOriginStep()): the
+// difference between the amounts here and the rows' sum, which a bolus only
+// puts in its own compartment.  Before the first advance (a record at the
+// first record's time) the initial conditions are not a dose, as on the
+// first advance.  A model tracking no origin, or a later record with no
+// cached decomposition to build on, stays NA.  Writes the decomposition to O
+// (RX_LINCMT_ORIGIN_MAX squared) and *rateIdx the record whose cached rate
+// applies here: the next advanced one, whose rate is the one in force after
+// this time's events (-1: none); returns the seeded state (0 or 2: NA).
+static inline int linCmtOriginUnsolved(rx_solving_options_ind *ind, rx_solving_options *op,
+                                       int idx, int m, double *O, int *rateIdx) {
+  const int st = RX_LINCMT_ORIGIN_MAX;
+  const int w = RX_LINCMT_ORIGIN_SLOTW(m);
+  *rateIdx = -1;
+  if (OPT(op, linCmtOriginMask) == 0) return 0;
+  const int from = linCmtOriginCached(ind, idx, -1, -1, w, m*st);
+  const double *slot = linCmtOriginSlot(ind, from, w, 0);
+  const bool first = getTime(IND(ind, ix)[idx], ind) == getTime(IND(ind, ix)[0], ind);
+  if (slot == NULL && !first) return 0;
+  if (slot != NULL && slot[m*st] == 2.0) return 2;
+  const int n = LC_HAS(ind, n_all_times) ? IND(ind, n_all_times) : INT_MAX;
+  *rateIdx = linCmtOriginCached(ind, idx + 1, 1, n, w, m*st);
+  if (*rateIdx < 0) *rateIdx = from;
+  std::fill(O, O + st*st, 0.0);
+  if (slot != NULL) std::copy(slot, slot + m*st, O);
+  const double *A = getAdvan(idx);
+  for (int j = 0; j < m; ++j) {
+    double sum = 0.0;
+    for (int q = 0; q < m; ++q) sum += O[q*st + j];
+    double base = (first && OPT(op, inits) != NULL) ? OPT(op, inits)[OPT(op, linOffset) + j] : 0.0;
+    O[j*st + j] += A[j] - sum - base;
+  }
+  return 1;
+}
+
 // which1 = -9/-10 dispatch: find this row's decomposition and rate, then read
 // it.  Same re-query rule as which1 = -3 -- an already-solved idx reads the
 // per-idx caches, since both the live rate and the live decomposition have
@@ -3354,6 +3412,13 @@ static inline double linCmtBoriginQuery(linB_t &lcb, rx_solving_options_ind *ind
   int seeded = IND(ind, linCmtOriginOutSeeded);
   if (reQuery) {
     seeded = (origin == NULL) ? 0 : (int)origin[mOrig*RX_LINCMT_ORIGIN_MAX];
+  }
+  double unsolved[RX_LINCMT_ORIGIN_MAX*RX_LINCMT_ORIGIN_MAX];
+  if (reQuery && seeded == 0 && mOrig > 0 && mOrig <= RX_LINCMT_ORIGIN_MAX) {
+    int rateIdx = -1;
+    seeded = linCmtOriginUnsolved(ind, op, idx, mOrig, unsolved, &rateIdx);
+    origin = unsolved;
+    if (rateIdx >= 0) rate = linCmtBRateSlot(ind, rateIdx, OPT(op, numLin), 0);
   }
   return linCmtBorigin(lcb.lc, ind, op, origin, seeded, rate, ncmt, oral0,
                        which1, which2, trans, p1, v1, p2, p3, p4, p5, ka);

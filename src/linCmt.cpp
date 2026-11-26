@@ -3332,6 +3332,22 @@ static inline bool linCmtBread(linB_t &lcb, int which1, int which2, double *out)
   return false;
 }
 
+// The first record from `i` stepping by `step` (-1 or 1, stopping before
+// `end`) with a cached decomposition, or -1.  Past the cache's end (a NULL
+// slot) nothing later is cached; earlier records may be.
+static inline int linCmtOriginCached(rx_solving_options_ind *ind, int i, int step,
+                                     int end, int w, int flag) {
+  for (; i != end; i += step) {
+    const double *s = linCmtOriginSlot(ind, i, w, 0);
+    if (s == NULL) {
+      if (step > 0) return -1;
+    } else if (s[flag] != 0.0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // The decomposition at a record the solve never advanced: one at the same
 // time as the record before it (an observation at a dose time) or a
 // subject's first record.  It has no cache slot of its own, so its reads were
@@ -3354,28 +3370,13 @@ static inline int linCmtOriginUnsolved(rx_solving_options_ind *ind, rx_solving_o
   const int w = RX_LINCMT_ORIGIN_SLOTW(m);
   *rateIdx = -1;
   if (OPT(op, linCmtOriginMask) == 0) return 0;
-  const double *slot = NULL;
-  int from = -1;
-  for (int i = idx; i >= 0; --i) {
-    const double *s = linCmtOriginSlot(ind, i, w, 0);
-    if (s != NULL && s[m*st] != 0.0) {
-      slot = s;
-      from = i;
-      break;
-    }
-  }
+  const int from = linCmtOriginCached(ind, idx, -1, -1, w, m*st);
+  const double *slot = linCmtOriginSlot(ind, from, w, 0);
   const bool first = getTime(IND(ind, ix)[idx], ind) == getTime(IND(ind, ix)[0], ind);
   if (slot == NULL && !first) return 0;
   if (slot != NULL && slot[m*st] == 2.0) return 2;
   const int n = LC_HAS(ind, n_all_times) ? IND(ind, n_all_times) : INT_MAX;
-  for (int i = idx + 1; i < n; ++i) {
-    const double *s = linCmtOriginSlot(ind, i, w, 0);
-    if (s == NULL) break;
-    if (s[m*st] != 0.0) {
-      *rateIdx = i;
-      break;
-    }
-  }
+  *rateIdx = linCmtOriginCached(ind, idx + 1, 1, n, w, m*st);
   if (*rateIdx < 0) *rateIdx = from;
   std::fill(O, O + st*st, 0.0);
   if (slot != NULL) std::copy(slot, slot + m*st, O);

@@ -49,7 +49,7 @@ jobs:
           .pct <- covr::percent_coverage(cov)
           cat(sprintf("COVERAGE_PCT=%.2f\n", .pct), file = Sys.getenv("GITHUB_ENV"), append = TRUE)
 
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v6
         with:
           # A run on main must upload; a pull request run only fails when a
           # token is available.

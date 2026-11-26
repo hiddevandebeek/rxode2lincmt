@@ -27,7 +27,8 @@
   lagMask = 0L,
   originMask = 0L,
   hPar = -1L,
-  hStep = 0
+  hStep = 0,
+  forwardMax = 2L
 ) {
   .n <- nrow(ev)
   if (is.null(ss)) {
@@ -55,7 +56,8 @@
     as.integer(lagMask),
     as.integer(originMask),
     as.integer(hPar),
-    as.double(hStep)
+    as.double(hStep),
+    as.integer(forwardMax)
   )
 }
 

@@ -82,6 +82,7 @@ struct lcSim {
   bool useB;
   int hPar;
   double hStep;
+  int forwardMax;
   lcSimRx rx;
   lcSimOp op;
   lcSimInd ind;
@@ -146,7 +147,7 @@ struct lcSim {
     rx.linCmtScale = scale;
     rx.linCmtSensPhi = sensPhi;
     rx.linCmtSuspect = 1e-6;
-    rx.linCmtForwardMax = 2;  // rxode2's rxControl() default
+    rx.linCmtForwardMax = forwardMax;
     op.neq = neq;
     op.inits = inits.data();
     op.numLin = m;
@@ -328,6 +329,8 @@ static void lcSimCheck(int n, int m, int ncmt, int oral0, IntegerVector doseCmt,
 //'   `op->linCmtOriginMask`
 //' @param hPar,hStep with `hPar >= 0`, an H-perturbed evaluation of parameter
 //'   `hPar` by `hStep` (rxode2's step-size probe)
+//' @param forwardMax `linCmtForwardMax`: the most points the forward
+//'   difference methods use (rxode2's default is 2)
 //' @return list with `val` (solve pass value per record), `lhs` (output pass
 //'   value), `state` (solve buffer, one row per record) and `calls` (output
 //'   pass results of `calls`, one row per record)
@@ -339,7 +342,8 @@ List linCmtHostSim(NumericVector t, IntegerVector doseCmt, NumericVector doseAmt
                    int trans, bool useB, int sensType, int ndiff, int sensPhi,
                    IntegerMatrix calls, NumericVector linH, IntegerVector ss,
                    NumericVector ssTau, NumericVector ssVar, IntegerVector ssCmt,
-                   int lagMask, int originMask, int hPar, double hStep) {
+                   int lagMask, int originMask, int hPar, double hStep,
+                   int forwardMax) {
   int n = t.size();
   int m = ncmt + oral0;
   lcSimCheck(n, m, ncmt, oral0, doseCmt, doseAmt, doseRate, theta, calls, linH,
@@ -349,6 +353,7 @@ List linCmtHostSim(NumericVector t, IntegerVector doseCmt, NumericVector doseAmt
   sim.theta = theta; sim.ss = ss; sim.ssTau = ssTau; sim.ssVar = ssVar; sim.ssCmt = ssCmt;
   sim.n = n; sim.ncmt = ncmt; sim.oral0 = oral0; sim.trans = trans; sim.m = m;
   sim.useB = useB; sim.hPar = hPar; sim.hStep = hStep;
+  sim.forwardMax = forwardMax;
   // the state width: amounts, then (linCmtB) their sensitivities
   sim.neq = useB ? (m + ncmt*(2*ncmt + oral0) + oral0) : m;
   sim.h.assign(linH.begin(), linH.end());

@@ -35,13 +35,15 @@
 #'   `op->linCmtOriginMask`
 #' @param hPar,hStep with `hPar >= 0`, an H-perturbed evaluation of parameter
 #'   `hPar` by `hStep` (rxode2's step-size probe)
+#' @param forwardMax `linCmtForwardMax`: the most points the forward
+#'   difference methods use (rxode2's default is 2)
 #' @return list with `val` (solve pass value per record), `lhs` (output pass
 #'   value), `state` (solve buffer, one row per record) and `calls` (output
 #'   pass results of `calls`, one row per record)
 #' @keywords internal
 #' @export
-.linCmtHostSim <- function(t, doseCmt, doseAmt, doseRate, theta, ncmt, oral0, trans, useB, sensType, ndiff, sensPhi, calls, linH, ss, ssTau, ssVar, ssCmt, lagMask, originMask, hPar, hStep) {
-    .Call(`_rxode2lincmt_linCmtHostSim`, t, doseCmt, doseAmt, doseRate, theta, ncmt, oral0, trans, useB, sensType, ndiff, sensPhi, calls, linH, ss, ssTau, ssVar, ssCmt, lagMask, originMask, hPar, hStep)
+.linCmtHostSim <- function(t, doseCmt, doseAmt, doseRate, theta, ncmt, oral0, trans, useB, sensType, ndiff, sensPhi, calls, linH, ss, ssTau, ssVar, ssCmt, lagMask, originMask, hPar, hStep, forwardMax) {
+    .Call(`_rxode2lincmt_linCmtHostSim`, t, doseCmt, doseAmt, doseRate, theta, ncmt, oral0, trans, useB, sensType, ndiff, sensPhi, calls, linH, ss, ssTau, ssVar, ssCmt, lagMask, originMask, hPar, hStep, forwardMax)
 }
 
 #' Force the delta-keyed exponential memo on or off (tests/benchmarks)

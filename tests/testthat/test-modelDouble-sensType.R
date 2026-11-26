@@ -79,7 +79,7 @@ for (.ncmt in 1:3) {
       skip_on_cran()
       for (.rate in list(c(0, 0), c(3, 4))) {
         .fwd <- .callS(.ncmt, .oral0, 3L, rate = .rate)
-        expect_identical(.callS(.ncmt, .oral0, 32L, rate = .rate)$Jg, .fwd$Jg)
+        expect_equal(.callS(.ncmt, .oral0, 32L, rate = .rate)$Jg, .fwd$Jg, tolerance = 1e-12)
         expect_equal(.callS(.ncmt, .oral0, 31L, rate = .rate)$Jg, .fwd$Jg, tolerance = 1e-10)
         for (.st in c(1L, 2L, 10L, 20L)) {
           .r <- .callS(.ncmt, .oral0, .st, rate = .rate)

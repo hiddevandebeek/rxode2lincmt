@@ -19,6 +19,11 @@
   `sensType` values 1, 2, 10 and 20: it now computes the base value first, as
   `linCmtB()` does, and all four use the step `sensH`.
 
+- The four-point forward difference that `linCmt()` finite-difference
+  gradients fall back to with `linCmtForwardMax = 3` used the coefficient 6
+  instead of 2 on its last point, so a suspect gradient came out wrong.  The
+  default (`linCmtForwardMax = 2`) is unchanged.
+
 # rxode2lincmt 0.1.1
 
 ## New features

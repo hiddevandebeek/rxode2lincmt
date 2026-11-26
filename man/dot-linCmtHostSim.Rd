@@ -26,7 +26,8 @@
   lagMask,
   originMask,
   hPar,
-  hStep
+  hStep,
+  forwardMax
 )
 }
 \arguments{
@@ -74,6 +75,9 @@ amount per record}
 
 \item{hPar, hStep}{with \code{hPar >= 0}, an H-perturbed evaluation of parameter
 \code{hPar} by \code{hStep} (rxode2's step-size probe)}
+
+\item{forwardMax}{\code{linCmtForwardMax}: the most points the forward
+difference methods use (rxode2's default is 2)}
 }
 \value{
 list with \code{val} (solve pass value per record), \code{lhs} (output pass

@@ -63,8 +63,18 @@ test_that("finite-difference sensTypes give the interval's own sensitivity", {
       .p <- .hsPar(.ncmt, .oral0)
       .fd <- .hsFd(.ev, .p, .ncmt, .oral0)
       .calls <- .hsJgCalls(.ncmt, .oral0)
-      .run <- function(st) {
-        .hsRun(.ev, .p, .ncmt, .oral0, useB = TRUE, sensType = st, calls = .calls, linH = rep(1e-5, 7))
+      .run <- function(st, forwardMax = 2L) {
+        .hsRun(
+          .ev,
+          .p,
+          .ncmt,
+          .oral0,
+          useB = TRUE,
+          sensType = st,
+          calls = .calls,
+          linH = rep(1e-5, 7),
+          forwardMax = forwardMax
+        )
       }
       .central <- .run(2L)
       expect_equal(.central$calls[2, ], .fd[2, ], tolerance = 1e-4, ignore_attr = TRUE)
@@ -76,6 +86,14 @@ test_that("finite-difference sensTypes give the interval's own sensitivity", {
           .central$calls,
           tolerance = 1e-3,
           label = sprintf("ncmt %d oral %d sensType %d", .ncmt, .oral0, .st)
+        )
+        # forwardMax 3 adds the four-point forward difference where the
+        # two-point one is suspect
+        expect_equal(
+          .run(.st, forwardMax = 3L)$calls,
+          .central$calls,
+          tolerance = 1e-3,
+          label = sprintf("ncmt %d oral %d sensType %d forwardMax 3", .ncmt, .oral0, .st)
         )
       }
     }

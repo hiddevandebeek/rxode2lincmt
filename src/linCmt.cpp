@@ -3341,39 +3341,49 @@ static inline bool linCmtBread(linB_t &lcb, int which1, int which2, double *out)
 // this time, so its decomposition is that record's cached one plus exactly
 // the attribution the next advance would make (linCmtOriginStep()): the
 // difference between the amounts here and the rows' sum, which a bolus only
-// puts in its own compartment.  With nothing attributed yet (no slot, or the
-// empty one a first record caches) the initial conditions are not a dose,
-// as on the first advance.  Writes the decomposition to O (RX_LINCMT_ORIGIN_MAX
-// squared) and *fromIdx the record it builds on (-1: none); returns the
-// seeded state (2: poisoned, so NA).
+// puts in its own compartment.  Before the first advance (a record at the
+// first record's time) the initial conditions are not a dose, as on the
+// first advance.  A model tracking no origin, or a later record with no
+// cached decomposition to build on, stays NA.  Writes the decomposition to O
+// (RX_LINCMT_ORIGIN_MAX squared) and *rateIdx the record whose cached rate
+// applies here: the next advanced one, whose rate is the one in force after
+// this time's events (-1: none); returns the seeded state (0 or 2: NA).
 static inline int linCmtOriginUnsolved(rx_solving_options_ind *ind, rx_solving_options *op,
-                                       int idx, int m, double *O, int *fromIdx) {
+                                       int idx, int m, double *O, int *rateIdx) {
   const int st = RX_LINCMT_ORIGIN_MAX;
   const int w = RX_LINCMT_ORIGIN_SLOTW(m);
+  *rateIdx = -1;
+  if (OPT(op, linCmtOriginMask) == 0) return 0;
   const double *slot = NULL;
-  *fromIdx = -1;
+  int from = -1;
   for (int i = idx; i >= 0; --i) {
     const double *s = linCmtOriginSlot(ind, i, w, 0);
     if (s != NULL && s[m*st] != 0.0) {
       slot = s;
-      *fromIdx = i;
+      from = i;
       break;
     }
   }
+  const bool first = getTime(IND(ind, ix)[idx], ind) == getTime(IND(ind, ix)[0], ind);
+  if (slot == NULL && !first) return 0;
   if (slot != NULL && slot[m*st] == 2.0) return 2;
-  std::fill(O, O + st*st, 0.0);
-  bool empty = true;
-  if (slot != NULL) {
-    for (int k = 0; k < m*st; ++k) {
-      O[k] = slot[k];
-      if (O[k] != 0.0) empty = false;
+  const int n = LC_HAS(ind, n_all_times) ? IND(ind, n_all_times) : INT_MAX;
+  for (int i = idx + 1; i < n; ++i) {
+    const double *s = linCmtOriginSlot(ind, i, w, 0);
+    if (s == NULL) break;
+    if (s[m*st] != 0.0) {
+      *rateIdx = i;
+      break;
     }
   }
+  if (*rateIdx < 0) *rateIdx = from;
+  std::fill(O, O + st*st, 0.0);
+  if (slot != NULL) std::copy(slot, slot + m*st, O);
   const double *A = getAdvan(idx);
   for (int j = 0; j < m; ++j) {
     double sum = 0.0;
     for (int q = 0; q < m; ++q) sum += O[q*st + j];
-    double base = (empty && OPT(op, inits) != NULL) ? OPT(op, inits)[OPT(op, linOffset) + j] : 0.0;
+    double base = (first && OPT(op, inits) != NULL) ? OPT(op, inits)[OPT(op, linOffset) + j] : 0.0;
     O[j*st + j] += A[j] - sum - base;
   }
   return 1;
@@ -3404,10 +3414,10 @@ static inline double linCmtBoriginQuery(linB_t &lcb, rx_solving_options_ind *ind
   }
   double unsolved[RX_LINCMT_ORIGIN_MAX*RX_LINCMT_ORIGIN_MAX];
   if (reQuery && seeded == 0 && mOrig > 0 && mOrig <= RX_LINCMT_ORIGIN_MAX) {
-    int from = -1;
-    seeded = linCmtOriginUnsolved(ind, op, idx, mOrig, unsolved, &from);
+    int rateIdx = -1;
+    seeded = linCmtOriginUnsolved(ind, op, idx, mOrig, unsolved, &rateIdx);
     origin = unsolved;
-    if (from >= 0) rate = linCmtBRateSlot(ind, from, OPT(op, numLin), 0);
+    if (rateIdx >= 0) rate = linCmtBRateSlot(ind, rateIdx, OPT(op, numLin), 0);
   }
   return linCmtBorigin(lcb.lc, ind, op, origin, seeded, rate, ncmt, oral0,
                        which1, which2, trans, p1, v1, p2, p3, p4, p5, ka);

@@ -9,6 +9,10 @@
   then.  With an rxode2 that does not send them the carry stays in the fixed
   8-pair array, as before.
 
+- Internal test hook `.linCmtHostSim()` solves a synthetic subject through
+  `linCmtA()`/`linCmtB()` on stand-in solver structs, so the solver paths are
+  tested without rxode2.
+
 ## Bug fixes
 
 - The per-compartment dose-time and bioavailability sensitivities
@@ -19,12 +23,8 @@
   that time.  nlmixr2est's FOCEi reads the `-10` sensitivity at every
   observation, so a `linCmt()` model with an eta on `f()` failed every
   subject that had a sample at a dose time, and its fit returned a constant
-  objective.
-- Internal test hook `.linCmtHostSim()` solves a synthetic subject through
-  `linCmtA()`/`linCmtB()` on stand-in solver structs, so the solver paths are
-  tested without rxode2.
-
-## Bug fixes
+  objective.  At an infusion start the dose-time read uses the started rate;
+  a model tracking no origin still reads `NA`.
 
 - `linCmtModelDouble()` no longer crashes R with the finite-difference
   `sensType` values 1, 2, 10 and 20: it now computes the base value first, as

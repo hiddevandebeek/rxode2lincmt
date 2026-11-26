@@ -47,7 +47,7 @@ jobs:
           R CMD build --no-manual .
           ls -l rxode2lincmt_*.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: lincmt-tarball
           path: rxode2lincmt_*.tar.gz
@@ -85,7 +85,7 @@ jobs:
           extra-packages: any::rcmdcheck
           needs: check
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: lincmt-tarball
           path: tarball
@@ -143,7 +143,7 @@ jobs:
 
       - name: Upload check results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: check-${{ matrix.config.os }}-${{ matrix.config.r }}
           path: check

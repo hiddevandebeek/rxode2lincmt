@@ -6,6 +6,7 @@
 #include "linCmtDualN.h"
 #include "linCmtDiffConstant.h"
 #include "lcHost.h"
+#include <cstring>
 // This StanHeaders' <stan/math.hpp> (pulled in by macros2micros.h) only
 // includes the reverse-mode library, so forward-mode AD (stan::math::fvar,
 // used by linCmtFwdJac) must be requested explicitly, after the reverse-mode
@@ -149,6 +150,14 @@ namespace stan {
       Eigen::Matrix<stan::math::dualN<RX_LINCMT_DUAL_MAX>, Eigen::Dynamic, 2> dualG_;
 
       double c1_, c2_;
+      // Value-path (linCmtA) constant cache: the micro-constants g_ and the
+      // 2/3-cmt eigen-decomposition for the theta in valTheta_ (bitwise),
+      // so a row under an unchanged theta only evaluates the dt tail.
+      bool valOk_ = false;
+      int valN_ = 0;
+      double valTheta_[7];
+      stan::math::solComp2struct<double> valSol2_;
+      stan::math::solComp3struct<double> valSol3_;
 
       //' The initialization of this class
       //'
@@ -253,6 +262,7 @@ namespace stan {
       void setModelType(const int ncmt, const int oral0, const int trans, const int type,
                         const int numDiff) {
         // The cached variables need to expire
+        valOk_ = false;
         ncmt_ = ncmt;
         oral0_ = oral0;
         trans_ = trans;
@@ -1291,8 +1301,9 @@ namespace stan {
         int m = ncmt_ + oral0_;
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka), Phi;
         Eigen::Matrix<T, Eigen::Dynamic, 1> u;
-        std::vector<T> r(m);
-        for (int i = 0; i < m; i++) r[i] = T(rate_[i]);
+        std::vector<T> r(m, T(0.0));
+        // rate_ holds getNrate() = 1 + oral0_ entries (depot, central)
+        for (int i = 0; i <= oral0_; i++) r[i] = T(rate_[i]);
         linCmtExpmAug<T>(A, r.data(), dt_, Phi, u);
         for (int i = 0; i < m; i++) {
           T acc = u(i);
@@ -1319,12 +1330,23 @@ namespace stan {
           return false;
         }
         int m = ncmt_ + oral0_;
+        // The dose the closed forms take: a bolus into the depot or central
+        // compartment; the depot rate if positive, else the central rate.
+        // Anything else is left to the closed forms (NA).
+        std::vector<T> r(m, T(0.0)), z(m, T(0.0));
+        if (kind == linCmtSsBolus) {
+          if (bolusCmt_ < 0 || bolusCmt_ > oral0_) return false;
+        } else if (rate_[0] > 0) {
+          r[0] = T(rate_[0]);
+        } else if (oral0_ && rate_[1] > 0) {
+          r[1] = T(rate_[1]);
+        } else {
+          return false;
+        }
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka);
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> I =
           Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>::Identity(m, m);
         Eigen::Matrix<T, Eigen::Dynamic, 1> b(m), x(m);
-        std::vector<T> r(m), z(m, T(0.0));
-        for (int i = 0; i < m; i++) r[i] = T(rate_[i]);
         if (kind == linCmtSsBolus) {
           for (int i = 0; i < m; i++) b(i) = T(i == bolusCmt_ ? bolusAmt_ : 0.0);
           Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> P = linCmtExpm<T>(A, tau_);
@@ -2683,8 +2705,40 @@ namespace stan {
                          const Eigen::Matrix<double, Eigen::Dynamic, 2>& g,
                          const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta) {
         (void)yp; (void)g;
-        yp_ = getAlast(theta);
-        g_ = stan::math::macros2micros(theta, ncmt_, trans_);
+        // In place: no allocation once yp_/g_ are sized.  The in-place
+        // micro-constant conversion is statement for statement the same as
+        // macros2micros().
+        yp_.resize(ncmt_ + oral0_);
+        for (int i = oral0_ + ncmt_; i--;) yp_(i, 0) = A_[i];
+        g_.resize(ncmt_, 2);
+        stan::math::macros2microsInplace(theta, ncmt_, trans_, g_);
+        valOk_ = false;
+      }
+
+      // linAcalcAlast() for the value path: g_ and the eigen-decomposition
+      // are recomputed only when theta changes bit for bit (or the model is
+      // reshaped); a hit is exactly what recomputing would give.
+      void linAcalcAlastVal(const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta) {
+        yp_.resize(ncmt_ + oral0_);
+        for (int i = oral0_ + ncmt_; i--;) yp_(i, 0) = A_[i];
+        int n = (int)theta.size();
+        if (valOk_ && valN_ == n &&
+            memcmp(valTheta_, theta.data(), n*sizeof(double)) == 0) {
+          return;
+        }
+        g_.resize(ncmt_, 2);
+        stan::math::macros2microsInplace(theta, ncmt_, trans_, g_);
+        if (ncmt_ == 2) {
+          valSol2_ = stan::math::computeSolComp2(g_(0, 1), g_(1, 0), g_(1, 1));
+        } else if (ncmt_ == 3) {
+          valSol3_ = stan::math::computeSolComp3(g_(0, 1), g_(1, 0), g_(1, 1),
+                                                 g_(2, 0), g_(2, 1));
+        }
+        valOk_ = n <= 7;
+        if (valOk_) {
+          valN_ = n;
+          memcpy(valTheta_, theta.data(), n*sizeof(double));
+        }
       }
 
       // For stan Jacobian to work the class needs to take 1 argument
@@ -3152,11 +3206,21 @@ namespace stan {
               const Eigen::Matrix<double, Eigen::Dynamic, 2>& g,
               const Eigen::Matrix<double, Eigen::Dynamic, 1>& yp) {
 
+        Eigen::Matrix<double, Eigen::Dynamic, 1> ret0(ncmt_ + oral0_, 1);
+        fdoubleTo(theta, g, yp, ret0);
+        return ret0;
+      }
+
+      // fdouble() into a caller-owned vector (no allocation once sized).
+      void fdoubleTo(const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta,
+                     const Eigen::Matrix<double, Eigen::Dynamic, 2>& g,
+                     const Eigen::Matrix<double, Eigen::Dynamic, 1>& yp,
+                     Eigen::Matrix<double, Eigen::Dynamic, 1>& ret0) {
         double ka = 0.0;
         if (oral0_) {
           ka = theta[ncmt_*2];
         }
-        Eigen::Matrix<double, Eigen::Dynamic, 1> ret0(ncmt_ + oral0_, 1);
+        ret0.resize(ncmt_ + oral0_);
         if (type_ == linCmtNormal) {
           if (ncmt_ == 1) {
             linCmtStan1<double>(g, yp, ka, ret0);
@@ -3190,7 +3254,37 @@ namespace stan {
             linCmtStan3ssBolus(g, ka, ret0);
           }
         }
-        return ret0;
+      }
+
+      // evalTo() after linAcalcAlastVal(): the ordinary (non steady-state)
+      // 2/3-cmt row takes the cached eigen-decomposition straight to the
+      // tail, which is what linCmtStan2()/linCmtStan3() compute.
+      void evalValTo(const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta,
+                     Eigen::Matrix<double, Eigen::Dynamic, 1>& fx) {
+        if (type_ != linCmtNormal || ncmt_ == 1) {
+          evalTo(theta, fx);
+          return;
+        }
+        double ka = oral0_ ? theta[ncmt_*2] : 0.0;
+        fx.resize(ncmt_ + oral0_);
+        if (ncmt_ == 2) {
+          linCmtStan2Tail<double>(valSol2_, yp_.data(), ka, fx.data());
+        } else {
+          linCmtStan3Tail<double>(valSol3_, yp_.data(), ka, fx.data());
+        }
+        for (int i = 0; i < ncmt_ + oral0_; i++) {
+          Asave_[i] = fx(i, 0);
+        }
+      }
+
+      // operator()(theta) into a caller-owned vector: the value-path row
+      // without the return-value allocation.
+      void evalTo(const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta,
+                  Eigen::Matrix<double, Eigen::Dynamic, 1>& fx) {
+        fdoubleTo(theta, g_, yp_, fx);
+        for (int i = 0; i < ncmt_ + oral0_; i++) {
+          Asave_[i] = fx(i, 0);
+        }
       }
 
       Eigen::Matrix<double, Eigen::Dynamic, 1> operator()(const Eigen::Matrix<double, Eigen::Dynamic, 1>& theta) {
@@ -3375,7 +3469,7 @@ namespace stan {
                 thetaCur(i, 0) += hhh;
                 fnext2          = fdoubles(thetaCur);
                 fcur = (-11.0*fx + 18*fup -
-                        9.0*fnext + 6.0*fnext2).array()/(6.0*hhh)*scaleC_(i, 0);
+                        9.0*fnext + 2.0*fnext2).array()/(6.0*hhh)*scaleC_(i, 0);
                 Js.col(i) = fcur;
               } else {
                 Js.col(i)       =  fcur;

@@ -699,7 +699,9 @@ static void linCmtWinFill(stan::math::linCmtStan &lc, linCmtWin &w,
         stan::math::computeSolComp3(gF(0, 1), gF(1, 0), gF(1, 1), gF(2, 0), gF(2, 1));
       for (int i = 0; i < 3; i++) {
         w.dL[j][i] = s.L(i, 0).d_;
-        if (j == 0) w.L[i] = s.L(i, 0).val_;
+        // a failed decomposition leaves L unset: NaN bands the row
+        // (linCmtSeqTailJac) onto the full path, as in linCmtStan3
+        if (j == 0) w.L[i] = s.success ? s.L(i, 0).val_ : NAN;
         for (int r = 0; r < 3; r++) {
           w.dC[j][0][r][i] = s.C1(r, i).d_;
           w.dC[j][1][r][i] = s.C2(r, i).d_;
@@ -1712,20 +1714,26 @@ static inline NumericVector linCmtModelDoubleAlast(const double *asave, int nAla
 
 // Jacobian for linCmtModelDouble(); false for a sensType it does not
 // support.  The AD methods (3/30 forward fvar, 32 multi-direction fvar,
-// 31 reverse) need no
-// step; 10/20 use sensH, 1/2 the kernel's own step choice.
+// 31 reverse) need no step.  The finite differences use sensH: 1/10
+// forward, 2/20 central (rxode2 estimates the 1/2 step per subject, which a
+// single kernel call cannot).  Like linCmtBfdJac(), they need the base value
+// from calcFx() first.
 static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType,
                                         double sensH,
                                         Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, 1>> &thetaSens,
                                         Eigen::Matrix<double, Eigen::Dynamic, 1> &fx,
                                         Eigen::Matrix<double, -1, -1> &Js) {
   Eigen::Matrix<double, Eigen::Dynamic, 1> h =
-    Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(thetaSens.size());
+    Eigen::Matrix<double, Eigen::Dynamic, 1>::Constant(thetaSens.size(), sensH);
   switch (sensType) {
-  case 1: // forward
+  case 1:
+  case 10: // forward
+    lc.calcFx(thetaSens);
     lc.fForwardJac(thetaSens, h.data(), fx, Js);
     return true;
-  case 2:  // central
+  case 2:
+  case 20: // central
+    lc.calcFx(thetaSens);
     lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   case 31: // reverse-mode AD
@@ -1738,14 +1746,6 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
     return true;
   case 32:  // "ADm": all directions in one forward-mode pass; bitwise as 3
     lc.linCmtDualJac(thetaSens, fx, Js);
-    return true;
-  case 10:
-    h.setConstant(sensH);
-    lc.fForwardJac(thetaSens, h.data(), fx, Js);
-    return true;
-  case 20:
-    h.setConstant(sensH);
-    lc.fCentralJac(thetaSens, h.data(), fx, Js);
     return true;
   default:
     return false;
@@ -1780,10 +1780,9 @@ static inline bool linCmtModelDoubleJac(stan::math::linCmtStan &lc, int sensType
 //'   `v1` 4, `p2` 8, `p3` 16, `p4` 32, `p5` 64)
 //' @param sensType derivative method: 3 or 30 forward-mode automatic
 //'   differentiation, 32 all directions in one forward-mode pass, 31
-//'   reverse mode, 100 automatic choice, 1 and 2 forward and central
-//'   differences with the kernel's own step, 10 and 20 forward and central
-//'   differences with step `sensH`
-//' @param sensH finite-difference step for `sensType` 10 and 20
+//'   reverse mode, 100 automatic choice, 1 or 10 forward and 2 or 20
+//'   central differences with step `sensH`
+//' @param sensH finite-difference step for `sensType` 1, 2, 10 and 20
 //' @return list with `val` (central concentration) and `Alast` (carried
 //'   state after the step); with `deriv = TRUE` also `J` (Jacobian of the
 //'   amounts) and `Jg` (gradient of `val`)
@@ -1961,6 +1960,62 @@ List linCmtModelHess(double dt,
                       _["J"] = wrap(J),
                       _["H"] = H,
                       _["Alast"] = linCmtModelDoubleAlast(asave.data(), nAlast));
+}
+
+//' Value-path constant cache against the uncached kernel (test hook)
+//'
+//' Steps one kernel object through the rows of `par` with the theta-keyed
+//' constant cache linCmtA() uses, and another through the uncached
+//' evaluation, both from `alast0` with infusion `rate`.
+//'
+//' @param dt row time steps
+//' @param par numeric matrix, one row of (p1, v1, p2, p3, p4, p5, ka) per
+//'   step
+//' @param ncmt number of compartments
+//' @param oral0 1 for a depot, else 0
+//' @param trans parameterization code
+//' @param alast0 starting amounts
+//' @param rate infusion rates
+//' @return list with `cached` and `direct`, the amounts after each step
+//'   (one row per step)
+//' @keywords internal
+//' @export
+// [[Rcpp::export(.linCmtValueCacheCheck)]]
+List linCmtValueCacheCheck(NumericVector dt, NumericMatrix par,
+                           int ncmt, int oral0, int trans,
+                           NumericVector alast0, NumericVector rate) {
+  int m = ncmt + oral0;
+  if (alast0.size() != m) Rcpp::stop("alast0 size needs to be %d", m);
+  if (par.ncol() != 7 || par.nrow() != dt.size()) {
+    Rcpp::stop("par needs 7 columns and one row per dt");
+  }
+  stan::math::linCmtStan lcC(ncmt, oral0, trans, false, linCmtNormal, 0);
+  stan::math::linCmtStan lcD(ncmt, oral0, trans, false, linCmtNormal, 0);
+  int nRate = lcC.getNrate();
+  if (rate.size() != nRate) Rcpp::stop("rate size needs to be %d", nRate);
+  std::vector<double> aC(alast0.begin(), alast0.end()), aD = aC, sC(m), sD(m);
+  std::vector<double> r(rate.begin(), rate.end());
+  lcC.setPtr(aC.data(), r.data(), sC.data());
+  lcD.setPtr(aD.data(), r.data(), sD.data());
+  Eigen::Matrix<double, Eigen::Dynamic, 1> theta(lcC.getNpars()), fx;
+  Eigen::Matrix<double, Eigen::Dynamic, 1> yp(m);
+  Eigen::Matrix<double, Eigen::Dynamic, 2> g(ncmt, 2);
+  NumericMatrix outC(dt.size(), m), outD(dt.size(), m);
+  for (int i = 0; i < dt.size(); i++) {
+    linCmtFillTheta(theta, ncmt, oral0, par(i, 0), par(i, 1), par(i, 2),
+                    par(i, 3), par(i, 4), par(i, 5), par(i, 6));
+    lcC.setDt(dt[i]);
+    lcC.linAcalcAlastVal(theta);
+    lcC.evalValTo(theta, fx);
+    lcD.setDt(dt[i]);
+    lcD.linAcalcAlast(yp, g, theta);
+    Eigen::Matrix<double, Eigen::Dynamic, 1> fxD = lcD(theta);
+    for (int j = 0; j < m; j++) {
+      outC(i, j) = aC[j] = sC[j];
+      outD(i, j) = aD[j] = fxD(j, 0);
+    }
+  }
+  return List::create(_["cached"] = outC, _["direct"] = outD);
 }
 
 // Phase 3b.4 runtime fast-path state for the which1=-5 carry advance (see
@@ -2336,9 +2391,8 @@ static LINCMT_NOINLINE double linCmtAbody(linA_t &lca, rx_solve *rx,
       }
       lc.setDt(dt);
 
-      lc.linAcalcAlast(yp, lca.gg, theta);
-
-      fx = lc(theta);
+      lc.linAcalcAlastVal(theta);
+      lc.evalValTo(theta, fx);
     }
     return lc.adjustF(fx, theta, IND(ind, linCmtHV));
   } else if (which >= 0 && which < nAlast) {
@@ -3436,6 +3490,64 @@ static inline bool linCmtBread(linB_t &lcb, int which1, int which2, double *out)
   return false;
 }
 
+// The first record from `i` stepping by `step` (-1 or 1, stopping before
+// `end`) with a cached decomposition, or -1.  Past the cache's end (a NULL
+// slot) nothing later is cached; earlier records may be.
+static inline int linCmtOriginCached(rx_solving_options_ind *ind, int i, int step,
+                                     int end, int w, int flag) {
+  for (; i != end; i += step) {
+    const double *s = linCmtOriginSlot(ind, i, w, 0);
+    if (s == NULL) {
+      if (step > 0) return -1;
+    } else if (s[flag] != 0.0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The decomposition at a record the solve never advanced: one at the same
+// time as the record before it (an observation at a dose time) or a
+// subject's first record.  It has no cache slot of its own, so its reads were
+// NA -- and an estimator that reads the -10 bioavailability sensitivity at
+// every observation failed the whole subject on one such row.  Its amounts
+// are the last advanced record's carried forward plus the doses given at
+// this time, so its decomposition is that record's cached one plus exactly
+// the attribution the next advance would make (linCmtOriginStep()): the
+// difference between the amounts here and the rows' sum, which a bolus only
+// puts in its own compartment.  Before the first advance (a record at the
+// first record's time) the initial conditions are not a dose, as on the
+// first advance.  A model tracking no origin, or a later record with no
+// cached decomposition to build on, stays NA.  Writes the decomposition to O
+// (RX_LINCMT_ORIGIN_MAX squared) and *rateIdx the record whose cached rate
+// applies here: the next advanced one, whose rate is the one in force after
+// this time's events (-1: none); returns the seeded state (0 or 2: NA).
+static inline int linCmtOriginUnsolved(rx_solving_options_ind *ind, rx_solving_options *op,
+                                       int idx, int m, double *O, int *rateIdx) {
+  const int st = RX_LINCMT_ORIGIN_MAX;
+  const int w = RX_LINCMT_ORIGIN_SLOTW(m);
+  *rateIdx = -1;
+  if (OPT(op, linCmtOriginMask) == 0) return 0;
+  const int from = linCmtOriginCached(ind, idx, -1, -1, w, m*st);
+  const double *slot = linCmtOriginSlot(ind, from, w, 0);
+  const bool first = getTime(IND(ind, ix)[idx], ind) == getTime(IND(ind, ix)[0], ind);
+  if (slot == NULL && !first) return 0;
+  if (slot != NULL && slot[m*st] == 2.0) return 2;
+  const int n = LC_HAS(ind, n_all_times) ? IND(ind, n_all_times) : INT_MAX;
+  *rateIdx = linCmtOriginCached(ind, idx + 1, 1, n, w, m*st);
+  if (*rateIdx < 0) *rateIdx = from;
+  std::fill(O, O + st*st, 0.0);
+  if (slot != NULL) std::copy(slot, slot + m*st, O);
+  const double *A = getAdvan(idx);
+  for (int j = 0; j < m; ++j) {
+    double sum = 0.0;
+    for (int q = 0; q < m; ++q) sum += O[q*st + j];
+    double base = (first && OPT(op, inits) != NULL) ? OPT(op, inits)[OPT(op, linOffset) + j] : 0.0;
+    O[j*st + j] += A[j] - sum - base;
+  }
+  return 1;
+}
+
 // which1 = -9/-10 dispatch: find this row's decomposition and rate, then read
 // it.  Same re-query rule as which1 = -3 -- an already-solved idx reads the
 // per-idx caches, since both the live rate and the live decomposition have
@@ -3458,6 +3570,13 @@ static inline double linCmtBoriginQuery(linB_t &lcb, rx_solving_options_ind *ind
   int seeded = IND(ind, linCmtOriginOutSeeded);
   if (reQuery) {
     seeded = (origin == NULL) ? 0 : (int)origin[mOrig*RX_LINCMT_ORIGIN_MAX];
+  }
+  double unsolved[RX_LINCMT_ORIGIN_MAX*RX_LINCMT_ORIGIN_MAX];
+  if (reQuery && seeded == 0 && mOrig > 0 && mOrig <= RX_LINCMT_ORIGIN_MAX) {
+    int rateIdx = -1;
+    seeded = linCmtOriginUnsolved(ind, op, idx, mOrig, unsolved, &rateIdx);
+    origin = unsolved;
+    if (rateIdx >= 0) rate = linCmtBRateSlot(ind, rateIdx, OPT(op, numLin), 0);
   }
   return linCmtBorigin(lcb.lc, ind, op, origin, seeded, rate, ncmt, oral0,
                        which1, which2, trans, p1, v1, p2, p3, p4, p5, ka);

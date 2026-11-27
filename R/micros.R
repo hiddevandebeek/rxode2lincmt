@@ -36,9 +36,17 @@ linCmtMicros <- function(p1, v1, p2 = 0, p3 = 0, p4 = 0, p5 = 0, ncmt, trans = 1
   checkmate::assertNumber(p3, finite = TRUE)
   checkmate::assertNumber(p4, finite = TRUE)
   checkmate::assertNumber(p5, finite = TRUE)
-  .m <- .Call(`_rxode2lincmt_macros2micros`, as.double(p1), as.double(v1),
-              as.double(p2), as.double(p3), as.double(p4), as.double(p5),
-              as.integer(trans), as.integer(ncmt))
+  .m <- .Call(
+    `_rxode2lincmt_macros2micros`,
+    as.double(p1),
+    as.double(v1),
+    as.double(p2),
+    as.double(p3),
+    as.double(p4),
+    as.double(p5),
+    as.integer(trans),
+    as.integer(ncmt)
+  )
   .ret <- as.vector(t(.m))
   names(.ret) <- c("v", "k", "k12", "k21", "k13", "k31")[seq_len(2L * ncmt)]
   .ret

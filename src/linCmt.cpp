@@ -631,7 +631,9 @@ static void linCmtWinFill(stan::math::linCmtStan &lc, linCmtWin &w,
         stan::math::computeSolComp3(gF(0, 1), gF(1, 0), gF(1, 1), gF(2, 0), gF(2, 1));
       for (int i = 0; i < 3; i++) {
         w.dL[j][i] = s.L(i, 0).d_;
-        if (j == 0) w.L[i] = s.L(i, 0).val_;
+        // a failed decomposition leaves L unset: NaN bands the row
+        // (linCmtSeqTailJac) onto the full path, as in linCmtStan3
+        if (j == 0) w.L[i] = s.success ? s.L(i, 0).val_ : NAN;
         for (int r = 0; r < 3; r++) {
           w.dC[j][0][r][i] = s.C1(r, i).d_;
           w.dC[j][1][r][i] = s.C2(r, i).d_;

@@ -1290,8 +1290,9 @@ namespace stan {
         int m = ncmt_ + oral0_;
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka), Phi;
         Eigen::Matrix<T, Eigen::Dynamic, 1> u;
-        std::vector<T> r(m);
-        for (int i = 0; i < m; i++) r[i] = T(rate_[i]);
+        std::vector<T> r(m, T(0.0));
+        // rate_ holds getNrate() = 1 + oral0_ entries (depot, central)
+        for (int i = 0; i <= oral0_; i++) r[i] = T(rate_[i]);
         linCmtExpmAug<T>(A, r.data(), dt_, Phi, u);
         for (int i = 0; i < m; i++) {
           T acc = u(i);
@@ -1318,12 +1319,23 @@ namespace stan {
           return false;
         }
         int m = ncmt_ + oral0_;
+        // The dose the closed forms take: a bolus into the depot or central
+        // compartment; the depot rate if positive, else the central rate.
+        // Anything else is left to the closed forms (NA).
+        std::vector<T> r(m, T(0.0)), z(m, T(0.0));
+        if (kind == linCmtSsBolus) {
+          if (bolusCmt_ < 0 || bolusCmt_ > oral0_) return false;
+        } else if (rate_[0] > 0) {
+          r[0] = T(rate_[0]);
+        } else if (oral0_ && rate_[1] > 0) {
+          r[1] = T(rate_[1]);
+        } else {
+          return false;
+        }
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka);
         Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> I =
           Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>::Identity(m, m);
         Eigen::Matrix<T, Eigen::Dynamic, 1> b(m), x(m);
-        std::vector<T> r(m), z(m, T(0.0));
-        for (int i = 0; i < m; i++) r[i] = T(rate_[i]);
         if (kind == linCmtSsBolus) {
           for (int i = 0; i < m; i++) b(i) = T(i == bolusCmt_ ? bolusAmt_ : 0.0);
           Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> P = linCmtExpm<T>(A, tau_);

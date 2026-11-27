@@ -918,6 +918,7 @@ namespace stan {
       void
       linCmtStan1ssInf8(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                         T ka, Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf8)) return; // #18 band
 #define v     g(0, 0)
 #define k     g(0, 1)
         if (oral0_  == 1) {
@@ -969,6 +970,7 @@ namespace stan {
       linCmtStan1ssInf(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                        T ka,
                        Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf)) return; // #18 band
 #define v     g(0, 0)
 #define k     g(0, 1)
         if (oral0_  == 1) {
@@ -1022,6 +1024,7 @@ namespace stan {
       void
       linCmtStan1ssBolus(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                          T ka, Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsBolus)) return; // #18 band
 #define v     g(0, 0)
 #define k     g(0, 1)
         if (oral0_  == 1) {
@@ -1074,11 +1077,307 @@ namespace stan {
       //'
       //' @return nothing, updates ret instead
       //'
+      // ---- Confluences (rxode2lincmt#18) -------------------------------------
+      //
+      // The closed forms divide by differences of the rates the solution is
+      // built from -- the disposition rates (the eigenvalues), ka for an oral
+      // model, and 0 for an input rate (an infusion integral).  Two of them
+      // close together over the step (ka at a disposition rate, a double root,
+      // a slow system under an infusion) make those quotients 0/0-like: the
+      // values, and more so their derivatives, lose their digits.  A
+      // disposition rate far below the largest one loses its own digits to
+      // cancellation in the eigen-decomposition.
+      //
+      // Inside those bands the step and the steady states are computed from
+      // the matrix exponential of the compartment generator instead -- no rate
+      // differences and no eigenvalues, so no singular derivatives either --
+      // by Taylor expansion with scaling and squaring, on any scalar type.
+      // Outside them the closed forms run unchanged (bitwise).  One function
+      // decides, for the time-propagation solutions, the steady states and the
+      // windowed fast path alike (linCmtRateBand).
+      static constexpr double linCmtRootGapRel = 1e-3;   // |L_i - L_j| / largest
+      static constexpr double linCmtSmallRootRel = 1e-4; // smallest / largest rate
+      static constexpr double linCmtKaGap = 1e-2;        // |ka - L| * t
+      static constexpr double linCmtZeroGap = 1e-3;      // max L * t (a slow system)
+
+      // The double value of any scalar type the kernels run on.
+      static inline double linCmtVal(double x) { return x; }
+      template <typename U>
+      static inline double linCmtVal(const stan::math::fvar<U>& x) { return linCmtVal(x.val_); }
+      static inline double linCmtVal(const stan::math::var& x) { return x.val(); }
+      template <int N>
+      static inline double linCmtVal(const stan::math::dualN<N>& x) { return x.v_; }
+
+      // The band rule.  L: the nL disposition rates; t: the step or the
+      // dosing interval (0: no interval).  Each kind of rate pair is measured
+      // the way its quotient cancels:
+      //   - two disposition rates: the eigen coefficients 1/(L_i - L_j), whatever
+      //     the step -- a relative gap below 1e-3, or a rate below 1e-4 of the
+      //     largest (which also cancels in the decomposition itself);
+      //   - ka and a disposition rate: (E - Ea)/(ka - L), which closes with the
+      //     step -- |ka - L| t below 1e-2;
+      //   - a slow system over a time step (step = true): every rate close to 0
+      //     (the largest times t below 1e-3) -- the input integrals (1 - E)/L
+      //     and the eigen coefficients of the decay cancel alike.  Not for a
+      //     steady state, where (I - exp(A tau)) cancels the same way.
+      // The thresholds keep ordinary dense sampling on the closed forms.
+      static bool linCmtRateBand(const double *L, int nL, bool oral, double kaD,
+                                 bool step, double t) {
+        double lmax = 0.0, lmin = HUGE_VAL;
+        for (int i = 0; i < nL; i++) {
+          if (!std::isfinite(L[i])) return true;
+          lmax = std::max(lmax, std::fabs(L[i]));
+          lmin = std::min(lmin, std::fabs(L[i]));
+        }
+        if (nL >= 2) {
+          if (lmin < linCmtSmallRootRel*lmax) return true;
+          for (int i = 0; i < nL; i++) {
+            for (int j = i + 1; j < nL; j++) {
+              if (std::fabs(L[i] - L[j]) < linCmtRootGapRel*lmax) return true;
+            }
+          }
+        }
+        double at = std::fabs(t);
+        if (!(at > 0.0)) return false;
+        for (int i = 0; i < nL; i++) {
+          if (oral && std::fabs(kaD - L[i])*at < linCmtKaGap) return true;
+        }
+        if (step && lmax*at < linCmtZeroGap) return true;
+        return false;
+      }
+
+      // Disposition rates (double) of the micro constants g; false if the
+      // decomposition does not resolve.
+      template <typename T>
+      bool linCmtRatesD(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g, double *L, int &nL) const {
+        double k10 = linCmtVal(g(0, 1));
+        if (ncmt_ == 1) {
+          L[0] = k10; nL = 1;
+          return true;
+        }
+        double k12 = linCmtVal(g(1, 0)), k21 = linCmtVal(g(1, 1));
+        if (ncmt_ == 2) {
+          stan::math::solComp2struct<double> s2 = stan::math::computeSolComp2(k10, k12, k21);
+          L[0] = s2.L(0, 0); L[1] = s2.L(1, 0); nL = 2;
+          return s2.success;
+        }
+        double k13 = linCmtVal(g(2, 0)), k31 = linCmtVal(g(2, 1));
+        stan::math::solComp3struct<double> s3 = stan::math::computeSolComp3(k10, k12, k21, k13, k31);
+        nL = 3;
+        if (!s3.success) return false;
+        L[0] = s3.L(0, 0); L[1] = s3.L(1, 0); L[2] = s3.L(2, 0);
+        return true;
+      }
+
+      // Is this step (dt_ > 0, the rates in rate_) in a band?  L: its rates.
+      bool linCmtStepBand(const double *L, int nL, double kaD) const {
+        if (!(dt_ > 0.0)) return false; // same-time records stay closed form
+        return linCmtRateBand(L, nL, oral0_ != 0, kaD, true, dt_);
+      }
+
+      // The compartment generator A (depot, central, peripherals): x' = A x + r.
+      template <typename T>
+      Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>
+      linCmtGenerator(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g, const T& ka) const {
+        int m = ncmt_ + oral0_, c = oral0_;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A(m, m);
+        for (int i = 0; i < m; i++) for (int j = 0; j < m; j++) A(i, j) = T(0.0);
+        T out = g(0, 1);
+        if (oral0_) {
+          A(0, 0) = -ka;
+          A(c, 0) = ka;
+        }
+        if (ncmt_ >= 2) {
+          out = out + g(1, 0);
+          A(c, c + 1) = g(1, 1);
+          A(c + 1, c) = g(1, 0);
+          A(c + 1, c + 1) = -g(1, 1);
+        }
+        if (ncmt_ >= 3) {
+          out = out + g(2, 0);
+          A(c, c + 2) = g(2, 1);
+          A(c + 2, c) = g(2, 0);
+          A(c + 2, c + 2) = -g(2, 1);
+        }
+        A(c, c) = -out;
+        return A;
+      }
+
+      // exp(B t) by Taylor expansion with scaling and squaring.
+      template <typename T>
+      static Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>
+      linCmtExpm(const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& B, double t) {
+        int n = B.rows();
+        double nrm = 0.0;
+        for (int i = 0; i < n; i++) {
+          double r = 0.0;
+          for (int j = 0; j < n; j++) r += std::fabs(linCmtVal(B(i, j)))*std::fabs(t);
+          nrm = std::max(nrm, r);
+        }
+        int sq = 0;
+        while (nrm > 0.5 && sq < 60) { nrm *= 0.5; sq++; }
+        double sc = std::ldexp(t, -sq);
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> X(n, n), E(n, n), term(n, n);
+        for (int i = 0; i < n; i++) {
+          for (int j = 0; j < n; j++) {
+            X(i, j) = B(i, j)*sc;
+            E(i, j) = T(i == j ? 1.0 : 0.0);
+            term(i, j) = E(i, j);
+          }
+        }
+        for (int k = 1; k <= 16; k++) {
+          Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> nt = term*X;
+          for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) nt(i, j) = nt(i, j)/(double)k;
+          term = nt;
+          E = E + term;
+        }
+        for (int k = 0; k < sq; k++) {
+          Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> E2 = E*E;
+          E = E2;
+        }
+        return E;
+      }
+
+      // Phi = exp(A t) and u = int_0^t exp(A(t-s)) r ds, from one augmented
+      // exponential [[A, r], [0, 0]].
+      template <typename T>
+      static void linCmtExpmAug(const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& A,
+                                const T* r, double t,
+                                Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>& Phi,
+                                Eigen::Matrix<T, Eigen::Dynamic, 1>& u) {
+        int m = A.rows();
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> B(m + 1, m + 1);
+        for (int i = 0; i <= m; i++) for (int j = 0; j <= m; j++) B(i, j) = T(0.0);
+        for (int i = 0; i < m; i++) {
+          for (int j = 0; j < m; j++) B(i, j) = A(i, j);
+          B(i, m) = r[i];
+        }
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> E = linCmtExpm<T>(B, t);
+        Phi.resize(m, m);
+        u.resize(m);
+        for (int i = 0; i < m; i++) {
+          for (int j = 0; j < m; j++) Phi(i, j) = E(i, j);
+          u(i) = E(i, m);
+        }
+      }
+
+      // Solve M x = b (small; partial pivoting on the values).
+      template <typename T>
+      static Eigen::Matrix<T, Eigen::Dynamic, 1>
+      linCmtSolve(Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> M,
+                  Eigen::Matrix<T, Eigen::Dynamic, 1> b) {
+        int n = M.rows();
+        for (int c = 0; c < n; c++) {
+          int piv = c;
+          double best = std::fabs(linCmtVal(M(c, c)));
+          for (int r = c + 1; r < n; r++) {
+            double v = std::fabs(linCmtVal(M(r, c)));
+            if (v > best) { best = v; piv = r; }
+          }
+          if (piv != c) {
+            for (int j = 0; j < n; j++) std::swap(M(c, j), M(piv, j));
+            std::swap(b(c), b(piv));
+          }
+          for (int r = c + 1; r < n; r++) {
+            T f = M(r, c)/M(c, c);
+            for (int j = c; j < n; j++) M(r, j) = M(r, j) - f*M(c, j);
+            b(r) = b(r) - f*b(c);
+          }
+        }
+        Eigen::Matrix<T, Eigen::Dynamic, 1> x(n);
+        for (int r = n - 1; r >= 0; r--) {
+          T acc = b(r);
+          for (int j = r + 1; j < n; j++) acc = acc - M(r, j)*x(j);
+          x(r) = acc/M(r, r);
+        }
+        return x;
+      }
+
+      // One step through the generator (a banded time-propagation step).
+      template <typename T>
+      void linCmtStanExpm(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
+                          const T* yp, const T& ka, T* ret) const {
+        int m = ncmt_ + oral0_;
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka), Phi;
+        Eigen::Matrix<T, Eigen::Dynamic, 1> u;
+        std::vector<T> r(m, T(0.0));
+        // rate_ holds getNrate() = 1 + oral0_ entries (depot, central)
+        for (int i = 0; i <= oral0_; i++) r[i] = T(rate_[i]);
+        linCmtExpmAug<T>(A, r.data(), dt_, Phi, u);
+        for (int i = 0; i < m; i++) {
+          T acc = u(i);
+          for (int j = 0; j < m; j++) acc = acc + Phi(i, j)*yp[j];
+          ret[i] = acc;
+        }
+      }
+
+      // The steady states through the generator, inside their band (the same
+      // rule over the dosing interval):
+      //   bolus:     (I - exp(A tau)) x = d   (the state at the dose, dose in)
+      //   infusion:  (I - exp(A tau)) x = q   (the trough at the infusion
+      //              start; q = one interval from 0 with the infusion)
+      //   infinite:  A x = -r
+      // Returns true when it handled the call.
+      template <typename T>
+      bool linCmtSsGeneric(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g, T ka,
+                           Eigen::Matrix<T, Eigen::Dynamic, 1>& ret, int kind) const {
+        double L[3];
+        int nL = 0;
+        bool ok = linCmtRatesD(g, L, nL);
+        if (ok && !linCmtRateBand(L, nL, oral0_ != 0, linCmtVal(ka), false,
+                                  kind == linCmtSsInf8 ? 0.0 : tau_)) {
+          return false;
+        }
+        int m = ncmt_ + oral0_;
+        // The dose the closed forms take: a bolus into the depot or central
+        // compartment; the depot rate if positive, else the central rate.
+        // Anything else is left to the closed forms (NA).
+        std::vector<T> r(m, T(0.0)), z(m, T(0.0));
+        if (kind == linCmtSsBolus) {
+          if (bolusCmt_ < 0 || bolusCmt_ > oral0_) return false;
+        } else if (rate_[0] > 0) {
+          r[0] = T(rate_[0]);
+        } else if (oral0_ && rate_[1] > 0) {
+          r[1] = T(rate_[1]);
+        } else {
+          return false;
+        }
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> A = linCmtGenerator<T>(g, ka);
+        Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> I =
+          Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>::Identity(m, m);
+        Eigen::Matrix<T, Eigen::Dynamic, 1> b(m), x(m);
+        if (kind == linCmtSsBolus) {
+          for (int i = 0; i < m; i++) b(i) = T(i == bolusCmt_ ? bolusAmt_ : 0.0);
+          Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> P = linCmtExpm<T>(A, tau_);
+          x = linCmtSolve<T>(I - P, b);
+        } else if (kind == linCmtSsInf) {
+          Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Pon, Poff;
+          Eigen::Matrix<T, Eigen::Dynamic, 1> uon, uoff;
+          linCmtExpmAug<T>(A, r.data(), tinf_, Pon, uon);
+          linCmtExpmAug<T>(A, z.data(), tau_ - tinf_, Poff, uoff);
+          b = Poff*uon;
+          x = linCmtSolve<T>(I - Poff*Pon, b);
+        } else {
+          for (int i = 0; i < m; i++) b(i) = -r[i];
+          x = linCmtSolve<T>(A, b);
+        }
+        ret.resize(m);
+        for (int i = 0; i < m; i++) ret(i) = x(i);
+        return true;
+      }
+
       template <typename T>
       void linCmtStan1(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                        const Eigen::Matrix<T, Eigen::Dynamic, 1>& yp,
                        T ka,
                        Eigen::Matrix<T, Eigen::Dynamic, 1> &ret) const {
+        {
+          double L0 = linCmtVal(g(0, 1));
+          if (linCmtStepBand(&L0, 1, linCmtVal(ka))) {
+            linCmtStanExpm<T>(g, yp.data(), ka, ret.data());
+            return;
+          }
+        }
         linCmtStan1Tail<T>(g(0, 1), yp.data(), ka, ret.data());
       }
 
@@ -1138,6 +1437,7 @@ namespace stan {
       linCmtStan2ssInf8(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                         T ka,
                         Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf8)) return; // #18 band
 #define v     g(0, 0)
 #define k     g(0, 1)
 #define k20   g(0, 1)
@@ -1213,6 +1513,7 @@ namespace stan {
       linCmtStan2ssInf(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                        T ka,
                        Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf)) return; // #18 band
 #define v     g(0, 0)
 #define k     g(0, 1)
 #define k20   g(0, 1)
@@ -1330,6 +1631,7 @@ namespace stan {
       linCmtStan2ssBolus(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                          T ka,
                          Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsBolus)) return; // #18 band
 
 #define v     g(0, 0)
 #define k     g(0, 1)
@@ -1447,6 +1749,13 @@ namespace stan {
 
         stan::math::solComp2struct<T> sol2 =
           stan::math::computeSolComp2(k10, k12, k21);
+        {
+          double L[2] = {linCmtVal(sol2.L(0, 0)), linCmtVal(sol2.L(1, 0))};
+          if (linCmtStepBand(L, 2, linCmtVal(ka))) {
+            linCmtStanExpm<T>(g, yp.data(), ka, ret.data());
+            return;
+          }
+        }
         linCmtStan2Tail<T>(sol2, yp.data(), ka, ret.data());
 #undef k12
 #undef k21
@@ -1524,6 +1833,7 @@ namespace stan {
       linCmtStan3ssInf8(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                         T ka,
                         Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf8)) return; // #18 band
 #define v     g(0, 0)
 #define k20   g(0, 1)
 
@@ -1658,6 +1968,7 @@ namespace stan {
       linCmtStan3ssInf(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                        T ka,
                        Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsInf)) return; // #18 band
 #define v     g(0, 0)
 #define k20   g(0, 1)
 
@@ -1872,6 +2183,7 @@ namespace stan {
       linCmtStan3ssBolus(const Eigen::Matrix<T, Eigen::Dynamic, 2>& g,
                          T ka,
                          Eigen::Matrix<T, Eigen::Dynamic, 1>& ret) const {
+        if (linCmtSsGeneric(g, ka, ret, linCmtSsBolus)) return; // #18 band
 #define v     g(0, 0)
 #define k20   g(0, 1)
 
@@ -2077,6 +2389,15 @@ namespace stan {
 
         stan::math::solComp3struct<T> sol3 =
           stan::math::computeSolComp3(k10, k12, k21, k13, k31);
+        {
+          double L[3] = {linCmtVal(sol3.L(0, 0)), linCmtVal(sol3.L(1, 0)),
+                         linCmtVal(sol3.L(2, 0))};
+          if (!sol3.success) L[0] = NAN;
+          if (linCmtStepBand(L, 3, linCmtVal(ka))) {
+            linCmtStanExpm<T>(g, yp.data(), ka, ret.data());
+            return;
+          }
+        }
         linCmtStan3Tail<T>(sol3, yp.data(), ka, ret.data());
 #undef k12
 #undef k21

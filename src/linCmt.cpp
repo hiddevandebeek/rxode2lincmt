@@ -631,7 +631,9 @@ static void linCmtWinFill(stan::math::linCmtStan &lc, linCmtWin &w,
         stan::math::computeSolComp3(gF(0, 1), gF(1, 0), gF(1, 1), gF(2, 0), gF(2, 1));
       for (int i = 0; i < 3; i++) {
         w.dL[j][i] = s.L(i, 0).d_;
-        if (j == 0) w.L[i] = s.L(i, 0).val_;
+        // a failed decomposition leaves L unset: NaN bands the row
+        // (linCmtSeqTailJac) onto the full path, as in linCmtStan3
+        if (j == 0) w.L[i] = s.success ? s.L(i, 0).val_ : NAN;
         for (int r = 0; r < 3; r++) {
           w.dC[j][0][r][i] = s.C1(r, i).d_;
           w.dC[j][1][r][i] = s.C2(r, i).d_;
@@ -1402,6 +1404,18 @@ static bool linCmtSeqTailJac(linB_t &lcb, linCmtBind &wsp, int phiCtl,
   if (!w.valid || w.ncmt != ncmt || w.oral0 != oral0 || w.trans != trans ||
       w.npars != npars || memcmp(w.theta, thetaD, npars*sizeof(double)) != 0) {
     linCmtWinFill(lc, w, thetaD, ncmt, oral0, trans);
+  }
+  {
+    // The window's tails use the closed forms; a row in a confluence band
+    // (nlmixr2/rxode2lincmt#18) takes the full path, which routes it through
+    // the generator.  Same rule as linCmtStan{1,2,3}.
+    double L[3];
+    if (ncmt == 1) L[0] = w.k10;
+    else for (int i = 0; i < ncmt; i++) L[i] = w.L[i];
+    if (lc.dt_ > 0.0 &&
+        stan::math::linCmtStan::linCmtRateBand(L, ncmt, oral0 != 0, w.ka, true, lc.dt_)) {
+      return false;
+    }
   }
   // One delta-memo lookup per row; every requested direction reuses the
   // slot (the exponentials are shared, only the tangent differs by j).

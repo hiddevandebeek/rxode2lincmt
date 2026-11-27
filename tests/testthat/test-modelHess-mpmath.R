@@ -14,16 +14,26 @@
   .num <- function(s) as.numeric(strsplit(s, ",", fixed = TRUE)[[1]])
   lapply(.ref, function(l) {
     f <- strsplit(l, ";", fixed = TRUE)[[1]]
-    list(kind = f[1], p = .num(f[2]), t = as.numeric(f[3]), ii = as.numeric(f[4]),
-         dur = as.numeric(f[5]), value = as.numeric(f[6]), grad = .num(f[7]),
-         hess = .num(f[8]))
+    list(
+      kind = f[1],
+      p = .num(f[2]),
+      t = as.numeric(f[3]),
+      ii = as.numeric(f[4]),
+      dur = as.numeric(f[5]),
+      value = as.numeric(f[6]),
+      grad = .num(f[7]),
+      hess = .num(f[8])
+    )
   })
 }
 
 .mpmathShape <- function(kind) {
-  list(ncmt = as.integer(sub("^[a-z]+([123]).*$", "\\1", kind)),
-       oral0 = as.integer(startsWith(kind, "oral")),
-       ss = endsWith(kind, "ss"), inf = startsWith(kind, "inf"))
+  list(
+    ncmt = as.integer(sub("^[a-z]+([123]).*$", "\\1", kind)),
+    oral0 = as.integer(startsWith(kind, "oral")),
+    ss = endsWith(kind, "ss"),
+    inf = startsWith(kind, "inf")
+  )
 }
 
 .mpmathConfluent <- function(cs) {
@@ -45,8 +55,12 @@
     -Re(eigen(gen, only.values = TRUE)$values)
   }
   near <- min(lam) * cs$t < 1e-4
-  if (sh$oral0) near <- near || any(abs(p[2 * sh$ncmt + 1] - lam) / lam < 1e-2)
-  if (sh$ncmt == 3) near <- near || min(abs(diff(sort(lam))) / max(lam)) < 1e-3
+  if (sh$oral0) {
+    near <- near || any(abs(p[2 * sh$ncmt + 1] - lam) / lam < 1e-2)
+  }
+  if (sh$ncmt == 3) {
+    near <- near || min(abs(diff(sort(lam))) / max(lam)) < 1e-3
+  }
   near
 }
 
@@ -57,18 +71,35 @@
   n <- 2 * sh$ncmt + sh$oral0
   pp <- c(cs$p, rep(0, 7))
   ka <- if (sh$oral0) cs$p[n] else 0
-  .step <- function(st, dt, rate = rep(0, m), type = 0L, tau = 0, tinf = 0,
-                    amt = 0) {
-    linCmtModelHess(dt, pp[1], pp[2], if (sh$ncmt >= 2) pp[3] else 0,
-                    if (sh$ncmt >= 2) pp[4] else 0, if (sh$ncmt >= 3) pp[5] else 0,
-                    if (sh$ncmt >= 3) pp[6] else 0, ka, st$alast, st$H, rate,
-                    sh$ncmt, sh$oral0, 1L, type = type, tau = tau, tinf = tinf,
-                    amt = amt, bolusCmt = 0L)
+  .step <- function(st, dt, rate = rep(0, m), type = 0L, tau = 0, tinf = 0, amt = 0) {
+    linCmtModelHess(
+      dt,
+      pp[1],
+      pp[2],
+      if (sh$ncmt >= 2) pp[3] else 0,
+      if (sh$ncmt >= 2) pp[4] else 0,
+      if (sh$ncmt >= 3) pp[5] else 0,
+      if (sh$ncmt >= 3) pp[6] else 0,
+      ka,
+      st$alast,
+      st$H,
+      rate,
+      sh$ncmt,
+      sh$oral0,
+      1L,
+      type = type,
+      tau = tau,
+      tinf = tinf,
+      amt = amt,
+      bolusCmt = 0L
+    )
   }
   .nx <- function(r) list(alast = r$Alast, H = as.vector(r$H))
   st <- list(alast = rep(0, m + sh$ncmt * n + sh$oral0), H = rep(0, m * n * n))
   rt <- rep(0, m)
-  if (sh$inf) rt[1] <- 100 / cs$dur
+  if (sh$inf) {
+    rt[1] <- 100 / cs$dur
+  }
   .infusion <- function(st) {
     if (cs$t <= cs$dur) {
       .step(st, cs$t, rt)
@@ -98,8 +129,9 @@ test_that("linCmtModelHess matches the 60-digit reference away from confluence",
   expect_gte(length(generic), 25)
   kinds <- unique(vapply(generic, `[[`, "", "kind"))
   # every model shape, steady state included, is covered
-  expect_true(all(c("bolus2", "bolus3", "inf1", "inf2", "inf3", "oral1", "oral2",
-                    "oral3", "oral1ss", "oral2ss", "oral3ss") %in% kinds))
+  expect_true(all(
+    c("bolus2", "bolus3", "inf1", "inf2", "inf3", "oral1", "oral2", "oral3", "oral1ss", "oral2ss", "oral3ss") %in% kinds
+  ))
   for (cs in generic) {
     r <- .mpmathEval(cs)
     n <- length(cs$p)
@@ -119,8 +151,7 @@ test_that("the steady-state infusion kernel matches repeated dosing", {
     n <- 2 * sh$ncmt
     pp <- c(cs$p, rep(0, 7))
     .step <- function(st, dt, rate) {
-      linCmtModelHess(dt, pp[1], pp[2], pp[3], pp[4], 0, 0, 0, st$alast, st$H,
-                      rate, sh$ncmt, 0L, 1L)
+      linCmtModelHess(dt, pp[1], pp[2], pp[3], pp[4], 0, 0, 0, st$alast, st$H, rate, sh$ncmt, 0L, 1L)
     }
     .nx <- function(r) list(alast = r$Alast, H = as.vector(r$H))
     st <- list(alast = rep(0, m + sh$ncmt * n), H = rep(0, m * n * n))

@@ -10,10 +10,15 @@
 .hessTheta <- function(theta, ncmt, oral0) {
   # theta in (p1, v1, p2, p3, p4, p5, ka) order of the model
   .t <- c(theta, rep(0, 7))
-  list(p1 = .t[1], v1 = .t[2],
-       p2 = if (ncmt >= 2) .t[3] else 0, p3 = if (ncmt >= 2) .t[4] else 0,
-       p4 = if (ncmt >= 3) .t[5] else 0, p5 = if (ncmt >= 3) .t[6] else 0,
-       ka = if (oral0) theta[2 * ncmt + 1] else 0)
+  list(
+    p1 = .t[1],
+    v1 = .t[2],
+    p2 = if (ncmt >= 2) .t[3] else 0,
+    p3 = if (ncmt >= 2) .t[4] else 0,
+    p4 = if (ncmt >= 3) .t[5] else 0,
+    p5 = if (ncmt >= 3) .t[6] else 0,
+    ka = if (oral0) theta[2 * ncmt + 1] else 0
+  )
 }
 
 # A dosing record list: each step is list(dt, dose (amount added to the
@@ -47,22 +52,40 @@
   .eV[2] <- 1
   lapply(reg, function(s) {
     .alast[1] <<- .alast[1] + s$dose
-    .r <- linCmtModelHess(s$dt, .p$p1, .p$v1, .p$p2, .p$p3, .p$p4, .p$p5,
-                          .p$ka, .alast, .hCarry, s$rate, ncmt, oral0, 1L,
-                          quadCarry = quadCarry)
+    .r <- linCmtModelHess(
+      s$dt,
+      .p$p1,
+      .p$v1,
+      .p$p2,
+      .p$p3,
+      .p$p4,
+      .p$p5,
+      .p$ka,
+      .alast,
+      .hCarry,
+      s$rate,
+      ncmt,
+      oral0,
+      1L,
+      quadCarry = quadCarry
+    )
     .alast <<- .r$Alast
     .hCarry <<- as.vector(.r$H)
     # concentration = central amount / v1 (trans = 1)
     .amt <- .r$fx[.c]
     .jac <- .r$J[.c, ]
-    .hAmt <- .r$H[, , .c]
+    .hAmt <- .r$H[,, .c]
     .vol <- .p$v1
-    list(val = .amt / .vol,
-         grad = .jac / .vol - .amt / .vol^2 * .eV,
-         hess = .hAmt / .vol - (outer(.jac, .eV) + outer(.eV, .jac)) / .vol^2 +
-           2 * .amt / .vol^3 * outer(.eV, .eV),
-         Hc = .r$Hc, Jg = .r$Jg, cval = .r$val,
-         fx = .r$fx, J = .r$J)
+    list(
+      val = .amt / .vol,
+      grad = .jac / .vol - .amt / .vol^2 * .eV,
+      hess = .hAmt / .vol - (outer(.jac, .eV) + outer(.eV, .jac)) / .vol^2 + 2 * .amt / .vol^3 * outer(.eV, .eV),
+      Hc = .r$Hc,
+      Jg = .r$Jg,
+      cval = .r$val,
+      fx = .r$fx,
+      J = .r$J
+    )
   })
 }
 
@@ -74,9 +97,29 @@
   .alast <- rep(0, .m + ncmt * .n + oral0)
   lapply(reg, function(s) {
     .alast[1] <<- .alast[1] + s$dose
-    .r <- linCmtModelDouble(s$dt, .p$p1, .p$v1, .p$p2, .p$p3, .p$p4, .p$p5,
-                            .p$ka, .alast, s$rate, ncmt, oral0, 1L, TRUE,
-                            0L, 0, 0, 0, 0L, .hessMask(ncmt, oral0), 3L)
+    .r <- linCmtModelDouble(
+      s$dt,
+      .p$p1,
+      .p$v1,
+      .p$p2,
+      .p$p3,
+      .p$p4,
+      .p$p5,
+      .p$ka,
+      .alast,
+      s$rate,
+      ncmt,
+      oral0,
+      1L,
+      TRUE,
+      0L,
+      0,
+      0,
+      0,
+      0L,
+      .hessMask(ncmt, oral0),
+      3L
+    )
     .alast <<- .r$Alast
     .r
   })
@@ -107,17 +150,17 @@
   list(name = "1cmt oral", ncmt = 1L, oral0 = 1L, theta = c(2, 20, 0.8)),
   list(name = "2cmt iv", ncmt = 2L, oral0 = 0L, theta = c(2, 20, 4, 40)),
   list(name = "2cmt oral", ncmt = 2L, oral0 = 1L, theta = c(2, 20, 4, 40, 0.8)),
-  list(name = "3cmt iv", ncmt = 3L, oral0 = 0L,
-       theta = c(2, 20, 4, 40, 1, 60)),
-  list(name = "3cmt oral", ncmt = 3L, oral0 = 1L,
-       theta = c(2, 20, 4, 40, 1, 60, 0.8))
+  list(name = "3cmt iv", ncmt = 3L, oral0 = 0L, theta = c(2, 20, 4, 40, 1, 60)),
+  list(name = "3cmt oral", ncmt = 3L, oral0 = 1L, theta = c(2, 20, 4, 40, 1, 60, 0.8))
 )
 
 .relErr <- function(a, b) max(abs(a - b)) / max(abs(b))
 
 for (.cs in .hessCases) {
   for (.inf in c(FALSE, TRUE)) {
-    if (.inf && .cs$oral0 == 1L) next
+    if (.inf && .cs$oral0 == 1L) {
+      next
+    }
     .lab <- paste0(.cs$name, if (.inf) " infusion" else " bolus")
     test_that(paste("linCmtModelHess first order matches linCmtModelDouble:", .lab), {
       .reg <- .hessRegimen(.cs$oral0, .cs$ncmt, .inf)
@@ -125,8 +168,7 @@ for (.cs in .hessCases) {
       .d <- .hessChainDouble(.cs$theta, .cs$ncmt, .cs$oral0, .reg)
       for (s in seq_along(.reg)) {
         expect_equal(.h[[s]]$val, .d[[s]]$val, tolerance = 1e-12)
-        expect_equal(as.vector(.h[[s]]$grad), as.vector(.d[[s]]$Jg),
-                     tolerance = 1e-10)
+        expect_equal(as.vector(.h[[s]]$grad), as.vector(.d[[s]]$Jg), tolerance = 1e-10)
       }
     })
     test_that(paste("linCmtModelHess Hessian matches FD of exact gradient:", .lab), {

@@ -3,7 +3,7 @@
 ## defines are the ones rxode2 used when it compiled this code, kept identical
 ## for bitwise parity.
 
-compilerPath <- tools::Rcmd("config CC", stdout=TRUE)
+compilerPath <- tools::Rcmd("config CC", stdout = TRUE)
 
 # To distinguish between them, check the version output
 versionInfo <- try(system(paste(compilerPath, "--version"), intern = TRUE))
@@ -33,10 +33,18 @@ if (dir.exists(.tbbInc)) {
 } else {
   .tbbInc <- system.file("include", package = "RcppParallel", mustWork = TRUE)
 }
-.sh <- paste0("-I", shQuote(.tbbInc), " -D_REENTRANT -DSTAN_THREADS",
-              if (file.exists(file.path(.tbbInc, "tbb", "version.h"))) " -DTBB_INTERFACE_NEW",
-              " -@ISYSTEM@'", system.file("include", package = "StanHeaders", mustWork = TRUE), "'",
-              " -@ISYSTEM@'", system.file("include", "src", package = "StanHeaders", mustWork = TRUE), "'")
+.sh <- paste0(
+  "-I",
+  shQuote(.tbbInc),
+  " -D_REENTRANT -DSTAN_THREADS",
+  if (file.exists(file.path(.tbbInc, "tbb", "version.h"))) " -DTBB_INTERFACE_NEW",
+  " -@ISYSTEM@'",
+  system.file("include", package = "StanHeaders", mustWork = TRUE),
+  "'",
+  " -@ISYSTEM@'",
+  system.file("include", "src", package = "StanHeaders", mustWork = TRUE),
+  "'"
+)
 .in <- gsub("@SH@", gsub("-I", "-@ISYSTEM@", .sh), .in)
 
 if (.Platform$OS.type == "windows") {
@@ -44,8 +52,10 @@ if (.Platform$OS.type == "windows") {
   .i <- "I"
 } else {
   .makevars <- file("src/Makevars", "wb")
-  if (any(grepl("Pop!_OS", utils::osVersion, fixed = TRUE)) ||
-        any(grepl("Ubuntu", utils::osVersion, fixed = TRUE))) {
+  if (
+    any(grepl("Pop!_OS", utils::osVersion, fixed = TRUE)) ||
+      any(grepl("Ubuntu", utils::osVersion, fixed = TRUE))
+  ) {
     .i <- "isystem"
   } else {
     .i <- "I"

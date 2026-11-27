@@ -24,6 +24,31 @@
   which has no rate differences and no eigenvalues; outside them the closed
   forms run unchanged (bitwise).  Every case of a 60-digit reference now
   matches to 1e-10 in value and 1e-9 in gradient (#18).
+- Internal test hook `.linCmtHostSim()` solves a synthetic subject through
+  `linCmtA()`/`linCmtB()` on stand-in solver structs, so the solver paths are
+  tested without rxode2.
+
+## Bug fixes
+
+- The per-compartment dose-time and bioavailability sensitivities
+  (`linCmtB()` `which1 = -9` and `-10`) are no longer `NA` at a record the
+  solve does not advance: one at the same time as the record before it, such
+  as an observation at a dose time.  Such a record had no decomposition of
+  its own; it now takes the last advanced record's, plus the doses given at
+  that time.  nlmixr2est's FOCEi reads the `-10` sensitivity at every
+  observation, so a `linCmt()` model with an eta on `f()` failed every
+  subject that had a sample at a dose time, and its fit returned a constant
+  objective.  At an infusion start the dose-time read uses the started rate;
+  a model tracking no origin still reads `NA`.
+
+- `linCmtModelDouble()` no longer crashes R with the finite-difference
+  `sensType` values 1, 2, 10 and 20: it now computes the base value first, as
+  `linCmtB()` does, and all four use the step `sensH`.
+
+- The four-point forward difference that `linCmt()` finite-difference
+  gradients fall back to with `linCmtForwardMax = 3` used the coefficient 6
+  instead of 2 on its last point, so a suspect gradient came out wrong.  The
+  default (`linCmtForwardMax = 2`) is unchanged.
 
 # rxode2lincmt 0.1.1
 
@@ -38,6 +63,13 @@
 - `linCmt()` value-only solves (SAEM, `rxSolve()` simulation, pred-only
   solves) return an already-solved row before any model setup.  Results are
   bitwise unchanged (#9).
+
+- `linCmt()` value-only solves no longer allocate on each computed row.
+  Results are bitwise unchanged (#9).
+
+- `linCmt()` value-only solves compute the micro-constants and the 2- and
+  3-compartment eigen-decomposition once per parameter set instead of on
+  every row.  Results are bitwise unchanged (#9).
 
 ## Bug fixes
 

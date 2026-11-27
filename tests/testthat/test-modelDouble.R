@@ -1,16 +1,34 @@
 .lcPar <- c(cl = 2, v = 20, q = 3, vp = 40, q2 = 1, vp2 = 80, ka = 1.1)
 
 .lcCall <- function(dt, par, ncmt, oral0, alast, rate, deriv, sensType = 3L) {
-  linCmtModelDouble(dt, par[["cl"]], par[["v"]], par[["q"]], par[["vp"]],
-                    par[["q2"]], par[["vp2"]], par[["ka"]],
-                    as.double(alast), as.double(rate), as.integer(ncmt),
-                    as.integer(oral0), 1L, deriv, 0L, 0, 0, 0, 0L, 0L,
-                    as.integer(sensType), 0.001)
+  linCmtModelDouble(
+    dt,
+    par[["cl"]],
+    par[["v"]],
+    par[["q"]],
+    par[["vp"]],
+    par[["q2"]],
+    par[["vp2"]],
+    par[["ka"]],
+    as.double(alast),
+    as.double(rate),
+    as.integer(ncmt),
+    as.integer(oral0),
+    1L,
+    deriv,
+    0L,
+    0,
+    0,
+    0,
+    0L,
+    0L,
+    as.integer(sensType),
+    0.001
+  )
 }
 
 .lcK <- function(par, ncmt, oral0) {
-  .lcRateMatrix(ncmt, oral0, par[["cl"]], par[["v"]], par[["q"]], par[["vp"]],
-                par[["q2"]], par[["vp2"]], par[["ka"]])
+  .lcRateMatrix(ncmt, oral0, par[["cl"]], par[["v"]], par[["q"]], par[["vp"]], par[["q2"]], par[["vp2"]], par[["ka"]])
 }
 
 for (.ncmt in 1:3) {
@@ -41,8 +59,7 @@ for (.ncmt in 1:3) {
 
 for (.ncmt in 1:3) {
   for (.oral0 in 0:1) {
-    test_that(sprintf("concentration gradient matches finite differences (ncmt %d, oral %d)",
-                      .ncmt, .oral0), {
+    test_that(sprintf("concentration gradient matches finite differences (ncmt %d, oral %d)", .ncmt, .oral0), {
       .alast <- c(100, numeric(.lcNalast(.ncmt, .oral0, TRUE) - 1L))
       .rate <- numeric(.ncmt + .oral0)
       .r <- .lcCall(1.0, .lcPar, .ncmt, .oral0, .alast, .rate, TRUE)
@@ -55,7 +72,8 @@ for (.ncmt in 1:3) {
         .dn <- .lcPar
         .dn[.idx[.j]] <- .dn[.idx[.j]] - .h
         .fd <- (.lcCall(1.0, .up, .ncmt, .oral0, .alast, .rate, TRUE)$val -
-                  .lcCall(1.0, .dn, .ncmt, .oral0, .alast, .rate, TRUE)$val) / (2 * .h)
+          .lcCall(1.0, .dn, .ncmt, .oral0, .alast, .rate, TRUE)$val) /
+          (2 * .h)
         expect_equal(.r$Jg[.j], .fd, tolerance = 1e-5)
       }
     })

@@ -1,0 +1,82 @@
+# NOT_CRAN test run, called by ci.yaml: installs rxode2lincmt from the
+# checkout and runs every testthat file in the package namespace (without
+# rxode2 installed).
+name: _tests.yaml
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: git ref to check out ('' = the triggering ref)
+        type: string
+        default: ''
+      matrix:
+        description: JSON list of {os, r} platforms
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ${{ matrix.config.os }}
+    name: tests ${{ matrix.config.os }} (${{ matrix.config.r }})
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(inputs.matrix) }}
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      NOT_CRAN: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-lincmt
+        with:
+          r-version: ${{ matrix.config.r }}
+          extra-packages: |
+            any::testthat
+            any::xml2
+          needs: check
+
+      - name: Install rxode2lincmt
+        shell: bash
+        run: R CMD INSTALL --no-docs --no-multiarch .
+
+      - name: Run tests
+        shell: Rscript {0}
+        run: |
+          library(testthat)
+          library(rxode2lincmt)
+          testthat::test_dir(
+            "tests/testthat",
+            package = "rxode2lincmt",
+            load_package = "installed",
+            reporter = testthat::MultiReporter$new(list(
+              testthat::ProgressReporter$new(show_praise = FALSE),
+              testthat::JunitReporter$new(file = file.path(getwd(), "junit.xml"))
+            )),
+            stop_on_failure = TRUE
+          )
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: junit-${{ matrix.config.os }}-${{ matrix.config.r }}
+          path: junit.xml
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload snapshots
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: snapshots-${{ matrix.config.os }}-${{ matrix.config.r }}
+          path: tests/testthat/_snaps
+          if-no-files-found: ignore
+          retention-days: 7
